@@ -1,0 +1,65 @@
+"""Entry point for the `herr-claw` command (pyproject [project.scripts]).
+
+Typer-based CLI; subcommands are stable per AGENTS.md: `chat` (P1) and
+`sprechen` (P3). `cli()` wraps the Typer app so the console-script pin
+`herr-claw = "main:cli"` keeps working.
+
+Loads the host .env in fallback mode via python-dotenv — the file's contents
+are never read or logged by hand; the OpenShell gateway provides the same
+variables in sandbox mode.
+"""
+
+from __future__ import annotations
+
+import typer
+
+app = typer.Typer(
+    help="Herr Claw — dein sandboxierter Deutsch-Tutor (NVIDIA Claw Agent Challenge)",
+    add_completion=False,
+)
+
+
+def _load_env() -> None:
+    from agent.config import REPO_ROOT
+    from dotenv import load_dotenv
+
+    load_dotenv(REPO_ROOT / ".env")  # no-op when absent (sandbox mode)
+
+
+@app.callback(invoke_without_command=True)
+def _root(ctx: typer.Context) -> None:
+    """Load env, then dispatch. Bare invocation prints help (exit 0)."""
+    if ctx.invoked_subcommand is None:
+        typer.echo(ctx.get_help())
+        raise typer.Exit()
+    _load_env()
+
+
+@app.command()
+def chat() -> None:
+    """Text-Chat im Terminal (Phase 1)."""
+    from agent.chat import run_chat
+
+    raise typer.Exit(run_chat())
+
+
+@app.command()
+def sprechen() -> None:
+    """Sprachmodus: Mikrofon → Antwort (Phase 3)."""
+    print("Der Sprachmodus kommt mit Phase 3 — für jetzt: herr-claw chat")
+    raise typer.Exit(code=2)
+
+
+def cli(argv: list[str] | None = None) -> int:
+    """Console-script entry: run the Typer app and return the exit code."""
+    try:
+        app(args=argv, prog_name="herr-claw")
+    except SystemExit as exc:
+        if isinstance(exc.code, int):
+            return exc.code
+        return 0 if exc.code is None else 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(cli())
