@@ -1,4 +1,4 @@
-"""CLI surface (Typer app): herr-claw chat / sprechen (stub) / --help."""
+"""CLI surface (Typer app): herr-claw chat / sprechen / bridge / --help."""
 
 from typer.testing import CliRunner
 
@@ -20,9 +20,22 @@ def test_bare_invocation_prints_help_and_exits_zero():
     assert "chat" in result.output and "sprechen" in result.output
 
 
-def test_sprechen_is_an_honest_stub():
+def test_sprechen_dispatches_to_run_sprechen(monkeypatch):
+    called = {}
+
+    def fake_run_sprechen(cfg=None, **kwargs):
+        called["ran"] = True
+        return 0
+
+    monkeypatch.setattr("voice.loop.run_sprechen", fake_run_sprechen)
     result = runner.invoke(main.app, ["sprechen"])
-    assert result.exit_code == 2
+    assert result.exit_code == 0
+    assert called["ran"] is True
+
+
+def test_sprechen_help_mentions_voice_pipeline():
+    result = runner.invoke(main.app, ["sprechen", "--help"])
+    assert result.exit_code == 0
     assert "Phase 3" in result.output
 
 
@@ -52,4 +65,3 @@ def test_chat_dispatches_to_run_chat(monkeypatch):
 
 def test_cli_wrapper_returns_exit_code_int():
     assert main.cli(["--help"]) == 0
-    assert main.cli(["sprechen"]) == 2

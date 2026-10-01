@@ -53,9 +53,10 @@ def bridge() -> None:
 
 @app.command()
 def sprechen() -> None:
-    """Sprachmodus: Mikrofon → Antwort (Phase 3)."""
-    print("Der Sprachmodus kommt mit Phase 3 — für jetzt: herr-claw chat")
-    raise typer.Exit(code=2)
+    """Sprachmodus: Mikrofon → Whisper (de) → Nemotron → Anna (Phase 3)."""
+    from voice.loop import run_sprechen
+
+    raise typer.Exit(run_sprechen())
 
 
 def cli(argv: list[str] | None = None) -> int:

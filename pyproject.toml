@@ -32,7 +32,7 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
 py-modules = ["main"]
-packages = ["agent", "herrclaw_bridge"]
+packages = ["agent", "herrclaw_bridge", "voice"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
