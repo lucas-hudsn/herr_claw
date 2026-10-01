@@ -1,6 +1,14 @@
-"""`herr-claw daemon` — the ONE daily scheduler (P4, SPEC §4.1).
+"""`herr-claw daemon` — Telegram loop + break-glass runner (P4; P5 re-scoped).
 
-One process, one loop, one config (agent/schedule.yaml):
+The ONE scheduler is the OpenClaw cron inside sandbox `my-assistant`
+(SPEC §4.1, P5): cron fires run `herr-claw daemon --trigger <job>` in the
+sandbox → ONE audited `run_job` bridge call → the job body executes HERE,
+host-side (agent/jobs.py), with the same dedup, state and Telegram path
+as this loop. What remains for the host loop is the interactive Telegram
+long-poll (quiz answers, slash commands) plus manual/break-glass use —
+`--once` semantics via `--trigger`, or the full loop below.
+
+Jobs at a glance (times from agent/schedule.yaml, Berlin wall clock):
 
 - 08:00 Morning Nudge — today's calendar suggests the topic, a free 15-min
   slot is booked (Reminder in 'Deutsch' + event in 'Deutsch Lernen' via the
@@ -10,18 +18,12 @@ One process, one loop, one config (agent/schedule.yaml):
 - 20:00 Recap — appends the daily note + Deutsch/progress.md to Obsidian
   and marks the day's practice reminders complete.
 
-Between jobs the daemon long-polls Telegram and answers the stable slash
-commands with the same ChatContext as chat/sprechen — same ONE state path
-(SrsState/SessionState/Tracker), same quiz engine, same tutor.
+Job dedup lives in session.json (`jobs_done`: job → ISO date) — cron fires
+and a restarted daemon can never fire the same job twice on one day.
 
-Job dedup lives in session.json (`jobs_done`: job → ISO date) — a restarted
-daemon never fires the same job twice on one day. Jobs missed earlier today
-run once at startup, oldest first, so an evening start still produces the
-day's artifacts.
-
-Scheduler invariant (AGENTS.md): this loop IS the one scheduling mechanism —
-no launchd, no cron, no second scheduler. OpenClaw cron stays the sandbox-in
-variant (P5 wiring deliberately not built).
+Scheduler invariant (AGENTS.md): the OpenClaw cron IS the one scheduling
+mechanism; no launchd, no second cron, no second schedule config. This
+loop consumes the same schedule only for catch-up/interactive duty.
 """
 
 from __future__ import annotations

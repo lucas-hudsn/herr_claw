@@ -389,15 +389,21 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "mcp" },
-    { name = "mlx-whisper" },
     { name = "openai" },
-    { name = "pyobjc-framework-eventkit" },
     { name = "python-dotenv" },
     { name = "pyyaml" },
+    { name = "typer" },
+]
+
+[package.optional-dependencies]
+bridge = [
+    { name = "pyobjc-framework-eventkit" },
+    { name = "uvicorn" },
+]
+voice = [
+    { name = "mlx-whisper" },
     { name = "sounddevice" },
     { name = "soundfile" },
-    { name = "typer" },
-    { name = "uvicorn" },
 ]
 
 [package.dev-dependencies]
@@ -408,16 +414,17 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "mcp", specifier = ">=2.2.0" },
-    { name = "mlx-whisper", specifier = ">=0.4.3" },
+    { name = "mlx-whisper", marker = "extra == 'voice'", specifier = ">=0.4.3" },
     { name = "openai", specifier = ">=1.100" },
-    { name = "pyobjc-framework-eventkit", specifier = ">=12.2.2" },
+    { name = "pyobjc-framework-eventkit", marker = "extra == 'bridge'", specifier = ">=12.2.2" },
     { name = "python-dotenv", specifier = ">=1.0" },
     { name = "pyyaml", specifier = ">=6.0" },
-    { name = "sounddevice", specifier = ">=0.5.6" },
-    { name = "soundfile", specifier = ">=0.14.0" },
+    { name = "sounddevice", marker = "extra == 'voice'", specifier = ">=0.5.6" },
+    { name = "soundfile", marker = "extra == 'voice'", specifier = ">=0.14.0" },
     { name = "typer", specifier = ">=0.12" },
-    { name = "uvicorn", specifier = ">=0.54.0" },
+    { name = "uvicorn", marker = "extra == 'bridge'", specifier = ">=0.54.0" },
 ]
+provides-extras = ["bridge", "voice"]
 
 [package.metadata.requires-dev]
 dev = [{ name = "pytest", specifier = ">=8.3" }]

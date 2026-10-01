@@ -1,7 +1,9 @@
 """Runtime configuration. Variable names and defaults follow .env.example.
 
-ONE state path: everything persistent lives in <repo>/state/ (bind-mounted
-to /sandbox/state/ when the NemoClaw sandbox is live — same code path).
+ONE state path: everything persistent lives in <repo>/state/ on the HOST —
+the sandbox never sees it (P5: NemoClaw host mounts are read-only, so the
+OpenClaw-cron trigger path calls the bridge instead, and job bodies run
+host-side where this file is the single source of paths).
 """
 
 from __future__ import annotations

@@ -1,9 +1,12 @@
 """The MCP bridge server — Streamable-HTTP on 127.0.0.1:8765 (SPEC §3/§5).
 
-Exposes exactly seven tools over MCPServer (mcp SDK v2): reminders.*, the
-calendar pair, and the scoped vault pair. All enforcement stays in the
-component modules (allowlist + audit) — this file is glue, deliberately
-boring: no policy decisions may ever live in the transport layer.
+Exposes exactly eight tools over MCPServer (mcp SDK v2): reminders.*, the
+calendar pair, the scoped vault pair, and `run_job` — the host-side
+execution path for the §4.1 jobs (the ONE scheduler is the OpenClaw cron
+in sandbox `my-assistant`; its cron fires call run_job from the sandbox,
+P5). All enforcement stays in the component modules (allowlist + audit) —
+this file is glue, deliberately boring: no policy decisions may ever live
+in the transport layer.
 
 Run with `herr-claw bridge` (main.py loads the host .env in fallback mode
 first; the bridge itself needs no secrets — only HERR_VAULT).
@@ -30,7 +33,8 @@ INSTRUCTIONS = (
     "Host bridge for Apple Reminders, Apple Calendar and the scoped Obsidian vault. "
     "Everything is allowlisted and audited: reminders → list 'Deutsch' only; "
     "calendar writes → calendar 'Deutsch Lernen' only; vault access → Deutsch/, "
-    "'Daily notes'/ and Weeks/ only, append-only. Denials come back as error results."
+    "'Daily notes'/ and Weeks/ only, append-only; run_job executes only the fixed "
+    "§4.1 jobs (nudge/quiz/recap) host-side. Denials come back as error results."
 )
 
 
@@ -102,12 +106,48 @@ def create_server(vault: Vault | None) -> MCPServer:
         require_vault().append(rel_path, text)
         return f"Angehängt: {rel_path}"
 
+    @server.tool()
+    @_guard
+    def run_job(name: str) -> str:
+        """Einen Tages-Job host-seitig ausführen: 'nudge' | 'quiz' | 'recap'
+        (feste Namen aus agent/schedule.yaml, keine Argumente — Triggerpfad
+        des OpenClaw-cron in der Sandbox; Dedup über session.json)."""
+        from agent.jobs import run_job_once
+
+        return run_job_once(name, vault=vault)
+
     return server
 
 
-def build_app(vault: Vault | None):
-    """ASGI app (for uvicorn); separate from run_server for tests."""
-    return create_server(vault).streamable_http_app()
+def build_app(vault: Vault | None, *, transport_security=None):
+    """ASGI app (for uvicorn); separate from run_server for tests.
+
+    `transport_security` (mcp TransportSecuritySettings) enables the SDK's
+    DNS-rebinding protection with an explicit Host/Origin allowlist — used
+    when the bridge is reachable under a non-localhost name (the OpenShell
+    host alias), where the default host check would 421 every request."""
+    return create_server(vault).streamable_http_app(transport_security=transport_security)
+
+
+def _transport_security_from_env():
+    """HERR_BRIDGE_ALLOWED_HOSTS / HERR_BRIDGE_ALLOWED_ORIGINS — comma-separated
+    extra Host/Origin values (e.g. `host.openshell.internal:8765`). Unset →
+    SDK default (protection off, loopback-only exposure). Set → protection ON
+    with loopback plus the listed names."""
+    from mcp.server.transport_security import TransportSecuritySettings
+
+    def _split(name):
+        return [part.strip() for part in os.environ.get(name, "").split(",") if part.strip()]
+
+    hosts = _split("HERR_BRIDGE_ALLOWED_HOSTS")
+    origins = _split("HERR_BRIDGE_ALLOWED_ORIGINS")
+    if not hosts and not origins:
+        return None
+    return TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=["127.0.0.1:8765", "localhost:8765", *hosts],
+        allowed_origins=["http://127.0.0.1:8765", "http://localhost:8765", *origins],
+    )
 
 
 def vault_from_env() -> Vault | None:
@@ -118,7 +158,7 @@ def vault_from_env() -> Vault | None:
 def run_server() -> int:
     import uvicorn
 
-    app = build_app(vault_from_env())
+    app = build_app(vault_from_env(), transport_security=_transport_security_from_env())
     uvicorn.run(app, host=BRIDGE_HOST, port=BRIDGE_PORT, log_level="warning")
     return 0
 

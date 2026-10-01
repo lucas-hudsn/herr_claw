@@ -1,4 +1,4 @@
-# Herr Claw 🤖
+# Herr Claw 🇩🇪
 
 A long-running, sandboxed **German-tutor agent** for the NVIDIA Claw Agent
 Challenge — for anyone at A1–A2 who lives in Apple Calendar, Reminders and
@@ -82,7 +82,7 @@ via the OpenAI-compatible endpoint at `integrate.api.nvidia.com`.
   to `Deutsch/progress.md`, `Deutsch/fehler.md`, and
   `Daily notes/YYYY-MM-DD-deutsch.md`. If `HERR_VAULT` is unset, chat still
   works and only `state/` persists.
-- **Audit trail**: every vault, Reminders, and Calendar call — allowed *and*
+- **Audit trail**: every vault, Reminders, and Calendar call — allowed _and_
   denied — lands as one JSON line in `~/.herr-claw/audit.log`.
 - **Robust inference**: `thinking` disabled on every call (reasoning mode
   measured 9–54 s vs ~1.4 s without), retry with backoff on transient
@@ -90,9 +90,9 @@ via the OpenAI-compatible endpoint at `integrate.api.nvidia.com`.
   that strips reasoning blocks and markdown so answers stay short and
   speakable (they will be read aloud).
 
-Not yet: sandbox network-policy wiring for the bridge endpoint and the
-`state/` bind-mount (the governance evidence pass), the Sunday weekly
-review, and the demo video.
+Not yet: the Sunday weekly review and the demo video. The sandbox-in
+deployment (OpenClaw cron scheduler, OpenShell policy with the bridge
+endpoint + caller pin, vendored trigger venv) is live — see Deployment above.
 
 ## Requirements
 
@@ -103,28 +103,66 @@ review, and the demo video.
   notes, and a Telegram bot token + your chat id for the daemon's nudges
 - For the bridge: macOS Automation permission for Reminders + Calendar, and
   EventKit calendar access (first call per context triggers the prompt once)
+- For the sandbox-in deployment: [NemoClaw](https://docs.nvidia.com/nemoclaw)
+  with the OpenClaw runtime (installs Docker Desktop as its own dependency)
+  — `nemoclaw onboard` sets it up
 
 ## Setup
 
 ```sh
-uv sync                 # create venv and install dependencies
+uv sync --all-extras    # create venv and install dependencies (incl. voice + bridge extras)
 cp .env.example .env    # then fill in the values
 ```
 
 Environment variables (documented in `.env.example`; `.env` is gitignored
 and holds live secrets — never commit it):
 
-| Variable | Purpose |
-| --- | --- |
-| `NVIDIA_API_KEY` | NVIDIA Build API key for Nemotron inference (required) |
-| `TELEGRAM_BOT_TOKEN` | Telegram bot token for the daemon (`herr-claw daemon`) |
-| `HERR_TELEGRAM_CHAT_ID` | The single allowed Telegram chat — the only one the bot answers |
-| `HERR_VAULT` | Path to your Obsidian vault; unset disables vault tools/writes |
-| `HERR_BRIDGE_URL` | MCP bridge endpoint; empty → `http://127.0.0.1:8765/mcp`, `off` disables bridge calls |
-| `HERR_MODEL` | Optional model override |
-| `HERR_NVIDIA_BASE_URL` | Optional endpoint override |
-| `HERR_WHISPER_MODEL` | Whisper model for voice mode (default `base` — never `tiny`, too weak for German) |
-| `HERR_MIC_DEVICE` | Optional input device override (name substring or index); auto-pick skips iPhone/iPad Continuity mics |
+| Variable                | Purpose                                                                                               |
+| ----------------------- | ----------------------------------------------------------------------------------------------------- |
+| `NVIDIA_API_KEY`        | NVIDIA Build API key for Nemotron inference (required)                                                |
+| `TELEGRAM_BOT_TOKEN`    | Telegram bot token for the daemon (`herr-claw daemon`)                                                |
+| `HERR_TELEGRAM_CHAT_ID` | The single allowed Telegram chat — the only one the bot answers                                       |
+| `HERR_VAULT`            | Path to your Obsidian vault; unset disables vault tools/writes                                        |
+| `HERR_BRIDGE_URL`       | MCP bridge endpoint; empty → `http://127.0.0.1:8765/mcp`, `off` disables bridge calls                 |
+| `HERR_BRIDGE_ALLOWED_HOSTS` / `HERR_BRIDGE_ALLOWED_ORIGINS` | Extra Host/Origin values the bridge accepts under a non-localhost name (sandbox-in deployment; see below) |
+| `HERR_NEMOCLAW_SANDBOX` | NemoClaw sandbox for the OpenClaw-cron scheduler (default `my-assistant`)                             |
+| `HERR_MODEL`            | Optional model override                                                                               |
+| `HERR_NVIDIA_BASE_URL`  | Optional endpoint override                                                                            |
+| `HERR_WHISPER_MODEL`    | Whisper model for voice mode (default `base` — never `tiny`, too weak for German)                     |
+| `HERR_MIC_DEVICE`       | Optional input device override (name substring or index); auto-pick skips iPhone/iPad Continuity mics |
+
+## Deployment — OpenClaw via NemoClaw/OpenShell (the primary mode)
+
+Herr Claw deploys as an **OpenClaw agent inside a NemoClaw/OpenShell sandbox**:
+inference is gateway-routed (`inference.local` → NVIDIA Nemotron 3, the raw key
+never enters the sandbox), the Telegram token lives in the OpenShell gateway
+(the sandbox sees only an `openshell:resolve:env:` placeholder, resolved at
+egress), and the network policy is deny-by-default. The **ONE scheduler is the
+OpenClaw cron inside the sandbox**: cron fires run `herr-claw daemon --trigger
+<job`⟩ in the sandbox, which makes ONE audited `run_job` call to the host
+bridge, where the job body executes (calendar/Reminder booking, vault recap,
+Telegram send) against `./state/` — state stays host-only and never enters the
+sandbox.
+
+One-time sandbox setup (P0/P5 did this; commands for reproduction):
+
+```sh
+# prerequisites: Docker Desktop running + docker context use default
+nemoclaw my-assistant start                       # start the sandbox (P0 onboarded it)
+nemoclaw my-assistant policy add --from-file nemoclaw-blueprint/policy-additions.yaml --yes
+#   ↑ then apply the increments nemoclaw's merge cannot carry (allowed_ips +
+#     binaries pin) — see the header of policy-additions.yaml for the exact
+#     `openshell policy set` recipe and verify with `nemoclaw my-assistant doctor`
+uv run herr-claw bridge &                         # host bridge (with HERR_BRIDGE_ALLOWED_HOSTS=host.openshell.internal:8765)
+uv run herr-claw daemon --install-cron            # register the 3 cron jobs from agent/schedule.yaml
+```
+
+The sandbox's trigger venv is vendored from the host (the sandbox never talks
+to pypi): build the wheel (`uv build --wheel`), download linux-aarch64 wheels
+for the core deps, `nemoclaw my-assistant upload` both, then
+`uv pip install --no-index --find-links … herr-claw` into
+`/sandbox/herrclaw/.venv`. `nemoclaw my-assistant doctor` verifies gateway,
+policy and inference health.
 
 ## Usage
 
@@ -132,27 +170,33 @@ and holds live secrets — never commit it):
 uv run herr-claw chat       # text chat in the terminal
 uv run herr-claw bridge     # MCP bridge on 127.0.0.1:8765 (second terminal)
 uv run herr-claw sprechen   # voice mode: mic → Whisper (de) → reply → Anna
-uv run herr-claw daemon     # daily loop + Telegram bot (leave it running)
+uv run herr-claw daemon     # Telegram loop + break-glass job runner (host)
 ```
 
-Run `herr-claw bridge` in a second terminal when you want `/üben` to book
-real Reminders/Calendar entries, chat to pick up the day's topic from your
-calendar, and the daemon to write recaps. Everything works without it —
-chat simply skips the booking, and the daemon says so honestly. The daemon
-additionally needs `TELEGRAM_BOT_TOKEN` + `HERR_TELEGRAM_CHAT_ID` (it has
-no reason to exist without the phone) and `HERR_VAULT` for the recap.
+The scheduled 08:00 nudge / 12:30 quiz / 20:00 recap come from the OpenClaw
+cron in the sandbox (see Deployment). `uv run herr-claw daemon` is the
+interactive Telegram loop (quiz answers, slash commands) and the break-glass
+runner for when the sandbox is down — it shares `session.json` dedup with the
+cron, so a job can never fire twice in one day.
+
+Run `herr-claw bridge` whenever the agent should book real Reminders/Calendar
+entries, pick up the day's topic from your calendar, or write recaps.
+Everything works without it — chat simply skips the booking, and the daemon
+says so honestly. The daemon additionally needs `TELEGRAM_BOT_TOKEN` +
+`HERR_TELEGRAM_CHAT_ID` (it has no reason to exist without the phone) and
+`HERR_VAULT` for the recap.
 
 In chat, talk to Herr Claw in German and use the commands:
 
-| Command | What it does |
-| --- | --- |
-| `/üben <Thema>` | Practice a topic (e.g. `/üben Bäckerei`) — with the bridge: books Reminder + 15-min Calendar slot |
-| `/quiz <n>` | Vocabulary quiz from the 100-word seed + your SRS state (default 5 questions, `„ende"` quits) |
-| `/fehler` | Show your last mistakes with corrections |
-| `/fortschritt` | Streak, totals, SRS vocab, current topic/pause |
-| `/erkläre <Wort>` | Explain a word in English, examples in German |
-| `/pause <Tage>` | Pause practice for a while (the daemon skips its jobs too) |
-| `/sprechen` | Start voice mode (runs in the terminal: `herr-claw sprechen`) |
+| Command           | What it does                                                                                      |
+| ----------------- | ------------------------------------------------------------------------------------------------- |
+| `/üben <Thema>`   | Practice a topic (e.g. `/üben Bäckerei`) — with the bridge: books Reminder + 15-min Calendar slot |
+| `/quiz <n>`       | Vocabulary quiz from the 100-word seed + your SRS state (default 5 questions, `„ende"` quits)     |
+| `/fehler`         | Show your last mistakes with corrections                                                          |
+| `/fortschritt`    | Streak, totals, SRS vocab, current topic/pause                                                    |
+| `/erkläre <Wort>` | Explain a word in English, examples in German                                                     |
+| `/pause <Tage>`   | Pause practice for a while (the daemon skips its jobs too)                                        |
+| `/sprechen`       | Start voice mode (runs in the terminal: `herr-claw sprechen`)                                     |
 
 Leave the chat with `Ctrl-D`; the session summary, streak, and any new
 mistakes are persisted then. In the daemon, the same commands arrive as
@@ -162,15 +206,19 @@ Telegram messages and the replies land back in the chat.
 
 ```
 main.py                 CLI entry (`herr-claw` script): env load + Typer app
+nemoclaw-blueprint/
+  policy-additions.yaml OpenShell policy preset: bridge endpoint for the cron trigger (P5)
 agent/
   SOUL.md               Tutor persona/system prompt (German, A1–A2, TTS-safe)
-  schedule.yaml         THE scheduler config (the daemon's three job times)
-  config.py             Config from env; ONE state path: <repo>/state/
+  schedule.yaml         THE scheduler config (the three job times, Berlin wall clock)
+  config.py             Config from env; ONE state path: <repo>/state/ (host-only)
   chat.py               The read–reply TUI loop, history window, persistence
   commands.py           The stable German slash commands (dispatch → direct or LLM)
   quiz.py               SRS quiz engine — seed-constrained, 5 question types
   telegram.py           Bot API client (long poll, single-chat allowlist, no token in logs)
-  daemon.py             The ONE scheduler: 08:00 nudge · 12:30 quiz · 20:00 recap + Telegram
+  cron_sync.py          P5: installs the OpenClaw cron jobs + the sandbox trigger client
+  jobs.py               P5: host-side job execution engine (the run_job tool's body)
+  daemon.py             Telegram loop + break-glass runner · 08:00 nudge · 12:30 quiz · 20:00 recap
   llm.py                Nemotron client, sanitization, correction parsing
   bridge.py             Sync MCP client to the bridge — the ONLY Apple/vault path for agent code
   scheduling.py         Free-slot picker, calendar-title → topic map, /üben booking flow
@@ -262,11 +310,11 @@ no test ever touches the real vault, Reminders, Calendar, Telegram, or
 
 ## Roadmap
 
-1. **Sandbox governance evidence**: OpenShell policy additions (allow the
-   bridge endpoint and the NVIDIA/Telegram egress, deny the rest),
-   bind-mount `./state/` into the sandbox — the deny-moment demo works in
-   both sandbox and host-only modes either way.
-2. **Overnight evidence**: leave the daemon running for real nights so the
-   08:00 nudge, booking, and 20:00 recap artifacts accumulate on their own.
-3. **v2 ideas**: Nemotron omni audio-in for the voice loop once German
-   accuracy suffices, the Sunday weekly review, pronunciation scoring.
+1. **Overnight evidence**: let the OpenClaw-cron scheduler run for real
+   nights so the 08:00 nudge, booking, and 20:00 recap artifacts accumulate
+   on their own (the cron entries are installed and live).
+2. **v2 ideas**: Nemotron omni audio-in for the voice loop once German
+   accuracy suffices, the Sunday weekly review, pronunciation scoring,
+   moving the interactive Telegram channel into the OpenClaw runtime
+   (the gateway already holds the token; today the host daemon keeps the
+   single `getUpdates` poll for the interactive quiz).

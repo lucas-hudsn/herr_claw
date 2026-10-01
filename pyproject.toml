@@ -5,19 +5,30 @@ description = "Herr Claw — sandboxed German-tutor agent (TUI + voice + Telegra
 readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
+    # Core = everything the sandbox-installed trigger path needs (P5: OpenClaw cron
+    # fires `herr-claw daemon --trigger <job>` inside the sandbox; core must install
+    # on Linux arm64, so all macOS-only packages live in the extras below).
+    # P1 (chat + memory): openai, python-dotenv, typer. P2/P5 (bridge client): mcp.
+    # P4 (Telegram + daemon + schedule.yaml): pyyaml.
     "mcp>=2.2.0",
-    # P1 (chat + memory): openai, python-dotenv, typer. P2 (Apple bridge): mcp, uvicorn,
-    # pyobjc-framework-eventkit. P3 (voice): mlx-whisper, sounddevice, soundfile (already in).
-    # P4 (Telegram + daemon): pyyaml (agent/schedule.yaml — the ONE scheduler config).
-    "mlx-whisper>=0.4.3",
     "openai>=1.100",
-    "pyobjc-framework-eventkit>=12.2.2",
     "python-dotenv>=1.0",
     "pyyaml>=6.0",
+    "typer>=0.12",
+]
+
+[project.optional-dependencies]
+# Host-only extras (never installed in the sandbox):
+# bridge = run the MCP bridge server (P2; EventKit + uvicorn are macOS-side)
+bridge = [
+    "pyobjc-framework-eventkit>=12.2.2",
+    "uvicorn>=0.54.0",
+]
+# voice = sprechen loop (P3; mlx-whisper + CoreAudio recording, Apple Silicon only)
+voice = [
+    "mlx-whisper>=0.4.3",
     "sounddevice>=0.5.6",
     "soundfile>=0.14.0",
-    "typer>=0.12",
-    "uvicorn>=0.54.0",
 ]
 
 [dependency-groups]

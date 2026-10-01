@@ -1,0 +1,65 @@
+# Herr Claw policy additions (P5) — sandbox `my-assistant` (NemoClaw/OpenShell).
+#
+# Desired egress end state (SPEC §5, deny-by-default otherwise):
+#   ✔ integrate.api.nvidia.com:443  — NVIDIA inference; already allowed by the
+#     sandbox baseline. Sandbox agents use the gateway-routed
+#     https://inference.local/v1 for the same model (raw key never enters the
+#     sandbox), so nothing to add here — documented for the allowlist picture.
+#   ✔ api.telegram.org:443          — covered by the `telegram` preset applied
+#     at onboard; the gateway resolves TELEGRAM_BOT_TOKEN at egress, so the
+#     token itself never enters the sandbox.
+#   ● herrclaw-bridge (below)       — the ONE host endpoint the sandbox may
+#     call: herrclaw_bridge (Apple Reminders/Calendar + scoped Obsidian vault
+#     + audited §4.1 run_job) on host loopback port 8765.
+#   ✘ everything else               — denied; unknown hosts go through the
+#     OpenClaw TUI approval flow.
+#
+# Apply with:
+#   nemoclaw my-assistant policy add --from-file nemoclaw-blueprint/policy-additions.yaml --dry-run
+#   nemoclaw my-assistant policy add --from-file nemoclaw-blueprint/policy-additions.yaml --yes
+#
+# NOTE: the trigger venv's packages are vendored from the host as manylinux
+# wheels (see README "Deployment") — the sandbox never talks to pypi, so no
+# package-registry egress is added here at all.
+#
+# The bridge endpoint is the OpenShell-managed host alias `host.openshell.internal`
+# (same pattern as the NVIDIA community recipes for credential-less host-routed
+# services): private-range access is granted via allowed_ips, host+port+verb
+# scoped to MCP's POST/GET/DELETE on /mcp.
+#
+# Applied increments that `nemoclaw policy add` cannot carry (its merge
+# normalizes `binaries:`/`allowed_ips:` away, so a preset containing them
+# never confirms) — these were added with a full `openshell policy set`:
+#   endpoints[].allowed_ips: [10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, fc00::/7]
+#   binaries: ["/sandbox/herrclaw/.venv/bin/*", "/usr/bin/curl",
+#              "/home/linuxbrew/.linuxbrew/Cellar/python@3.14/3.14.8/bin/python3.14"]
+# The binaries pin is the load-bearing caller scoping: only the trigger venv
+# (and curl for smoke tests) may reach the bridge; anything else on the
+# sandbox (node, the OpenClaw agent itself) is denied at the policy layer
+# (visible as DENIED lines with reason "binary ... not allowed" in the
+# sandbox OCSF log).
+# Governance enforcement for Apple/vault/job access additionally lives AT the
+# bridge: fixed allowlists plus ~/.herr-claw/audit.log, which records every
+# call — allowed AND denied. The deny moment in the demo comes from that log.
+version: 1
+preset:
+  name: herrclaw-bridge
+  description: Herr Claw P5 — allow the sandbox to reach the herrclaw_bridge MCP endpoint on host loopback :8765
+network_policies:
+  herrclaw-bridge:
+    name: herrclaw-bridge
+    endpoints:
+      - host: host.openshell.internal
+        port: 8765
+        protocol: rest
+        enforcement: enforce
+        rules:
+          - allow:
+              method: POST
+              path: /mcp
+          - allow:
+              method: GET
+              path: /mcp
+          - allow:
+              method: DELETE
+              path: /mcp

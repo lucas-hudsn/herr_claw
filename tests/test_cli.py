@@ -76,10 +76,11 @@ def test_daemon_dispatches_to_run_daemon(monkeypatch):
     assert called["ran"] is True
 
 
-def test_daemon_help_mentions_daily_loop():
+def test_daemon_help_mentions_scheduler_and_break_glass():
     result = runner.invoke(main.app, ["daemon", "--help"])
     assert result.exit_code == 0
-    assert "Phase 4" in result.output
+    assert "OpenClaw-cron" in result.output  # the ONE scheduler (P5)
+    assert "Break-Glass" in result.output  # the host loop's remaining role
 
 
 def test_cli_wrapper_returns_exit_code_int():

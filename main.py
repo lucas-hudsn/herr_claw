@@ -1,7 +1,8 @@
 """Entry point for the `herr-claw` command (pyproject [project.scripts]).
 
 Typer-based CLI; subcommands: `chat` (P1), `bridge` (P2, MCP on
-127.0.0.1:8765), `sprechen` (P3), `daemon` (P4, daily loop + Telegram).
+127.0.0.1:8765), `sprechen` (P3), `daemon` (P4 Telegram loop, break-glass;
+P5 `--trigger`/`--install-cron` = OpenClaw-cron trigger path).
 `cli()` wraps the Typer app so the console-script pin `herr-claw = "main:cli"`
 keeps working.
 
@@ -61,8 +62,31 @@ def sprechen() -> None:
 
 
 @app.command()
-def daemon() -> None:
-    """Täglich-Schleife: Nudge/Quiz/Recap + Telegram (Phase 4)."""
+def daemon(
+    trigger: str = typer.Option(
+        "",
+        "--trigger",
+        help="Einmalig: Job 'nudge'|'quiz'|'recap' über die Bridge ausführen "
+        "(Triggerpfad des OpenClaw-cron; läuft in der Sandbox).",
+    ),
+    install_cron: bool = typer.Option(
+        False,
+        "--install-cron",
+        help="Cron-Jobs aus agent/schedule.yaml idempotent in der Sandbox registrieren "
+        "(der OpenClaw-cron ist der EINE Scheduler).",
+    ),
+) -> None:
+    """Telegram-Schleife (Break-Glass): der EINE Scheduler ist der OpenClaw-cron
+    in der Sandbox (P5) — dieser Loop dient nur noch dem interaktiven Quiz
+    und als Notfall-Trigger."""
+    if trigger:
+        from agent.cron_sync import trigger_job
+
+        raise typer.Exit(trigger_job(trigger))
+    if install_cron:
+        from agent.cron_sync import install_cron
+
+        raise typer.Exit(install_cron())
     from agent.daemon import run_daemon
 
     raise typer.Exit(run_daemon())

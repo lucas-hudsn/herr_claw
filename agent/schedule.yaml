@@ -1,10 +1,11 @@
-# THE daily scheduler (SPEC §4.1) — one config file, one mechanism.
-# Loaded by `herr-claw daemon`; times are local laptop time.
-#
-# Scheduler note (AGENTS.md): this daemon loop IS the one scheduling
-# mechanism — no launchd, no cron, no second loop. (P0's OpenClaw-cron
-# verdict remains the sandbox-in variant; its P5 wiring is deliberately
-# not built, and the host daemon realizes the same §4.1 loop.)
+# THE daily scheduler config (SPEC §4.1) — one config file, one mechanism.
+# Times are Berlin wall clock; read by BOTH scheduler surfaces:
+# - `herr-claw daemon --install-cron` registers one OpenClaw cron job per
+#   entry inside sandbox `my-assistant` (the ONE scheduler, P5). Cron fires
+#   run `herr-claw daemon --trigger <job>` in the sandbox → ONE audited
+#   `run_job` bridge call → the job body executes on the host.
+# - `herr-claw daemon` (host loop) is break-glass only; it shares the same
+#   session.json dedup, so both surfaces never double-fire a job.
 jobs:
   nudge: "08:00"  # Morning Nudge: freebusy → slot → Reminder + event → Telegram
   quiz: "12:30"   # Micro-quiz: 3 questions from the weakest vocab (only if the nudge ran)
