@@ -96,3 +96,35 @@ def test_unknown_command_lists_commands(srs, session):
 def test_command_matching_is_case_insensitive(srs, session):
     out = dispatch("/FORTSCHRITT", make_ctx(srs, session))
     assert isinstance(out, Direct) and "Streak" in out.text
+
+
+class FakeBookingBridge:
+    """Enough bridge for /üben: canned freebusy, records tool names."""
+
+    def __init__(self):
+        self.calls = []
+
+    def call_tool(self, name, arguments=None):
+        self.calls.append(name)
+        if name == "calendar_freebusy":
+            return '{"events": []}'
+        return "ok"
+
+
+def test_ueben_books_via_bridge(srs, session):
+    ctx = make_ctx(srs, session)
+    ctx.bridge = FakeBookingBridge()
+    out = dispatch("/üben Bäckerei", ctx)
+    assert isinstance(out, ToLLM)
+    assert session.current_topic == "Bäckerei"
+    assert ctx.bridge.calls == ["calendar_freebusy", "reminders_add", "calendar_add"]
+    assert "Buchung über die Bridge" in out.system_note
+    assert "Bäckerei" in out.system_note
+
+
+def test_ueben_without_bridge_still_sets_topic(srs, session):
+    ctx = make_ctx(srs, session)  # bridge None — pre-bridge behavior unchanged
+    out = dispatch("/üben Bäckerei", ctx)
+    assert isinstance(out, ToLLM)
+    assert "Buchung" not in out.system_note
+    assert session.current_topic == "Bäckerei"

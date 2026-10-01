@@ -131,3 +131,84 @@ def test_llm_error_saves_state_and_exits_cleanly(config):
 
     assert SrsState(config.srs_path).totals.messages == 0  # failed turn not counted
     assert SessionState.load(config.session_path).last_session_turns == 0
+
+
+# ---- P2: bridge wiring — topic-from-calendar flourish -----------------------
+
+
+class FakeChatBridge:
+    def __init__(self, events=None, fail=False):
+        self.events = events or []
+        self.fail = fail
+        self.calls = []
+
+    def call_tool(self, name, arguments=None):
+        self.calls.append(name)
+        if self.fail:
+            from agent.bridge import BridgeError
+
+            raise BridgeError("Bridge nicht erreichbar")
+        import json
+
+        if name == "calendar_freebusy":
+            return json.dumps(
+                {
+                    "events": [
+                        {"title": t, "start": s, "end": e, "all_day": False}
+                        for t, s, e in self.events
+                    ]
+                }
+            )
+        return "ok"
+
+
+def _with_bridge(monkeypatch, config, bridge):
+    from dataclasses import replace
+
+    monkeypatch.setattr("agent.chat.BridgeClient", lambda url: bridge)
+    return replace(config, bridge_url="http://127.0.0.1:59999/mcp")
+
+
+def test_topic_derived_from_calendar_and_noted_once(monkeypatch, config):
+    cfg = _with_bridge(
+        monkeypatch, config, FakeChatBridge(events=[("Anmeldung Bürgeramt", "2026-10-02T16:00", "2026-10-02T16:30")])
+    )
+    fake = FakeTutor()
+    input_fn, output_fn, outputs = make_io(["Hallo!", "Noch was!"])
+    run_chat(cfg=cfg, tutor=fake, input_fn=input_fn, output_fn=output_fn)
+
+    assert any("Kalender" in line and "Behörden und Termine" in line for line in outputs)
+    # flourish rides on the FIRST LLM turn only
+    assert fake.calls[0]["system_note"] and "Behörden und Termine" in fake.calls[0]["system_note"]
+    assert fake.calls[1]["system_note"] is None
+
+    from agent.state import SessionState
+
+    assert SessionState.load(config.session_path).current_topic == "Behörden und Termine"
+
+
+def test_existing_topic_wins_over_calendar(monkeypatch, config):
+    cfg = _with_bridge(
+        monkeypatch, config, FakeChatBridge(events=[("Anmeldung Bürgeramt", "2026-10-02T16:00", "2026-10-02T16:30")])
+    )
+    config.session_path.parent.mkdir(parents=True, exist_ok=True)
+    config.session_path.write_text(
+        '{"version": 1, "current_topic": "Bäckerei"}', encoding="utf-8"
+    )
+    fake = FakeTutor()
+    input_fn, output_fn, outputs = make_io(["Hallo!"])
+    run_chat(cfg=cfg, tutor=fake, input_fn=input_fn, output_fn=output_fn)
+    assert not any("Kalender" in line for line in outputs)
+    assert fake.calls[0]["system_note"] is None
+
+
+def test_dead_bridge_degrades_silently(config):
+    from dataclasses import replace
+
+    cfg = replace(config, bridge_url="http://127.0.0.1:1/mcp")
+    fake = FakeTutor()
+    input_fn, output_fn, outputs = make_io(["Hallo!"])
+    code = run_chat(cfg=cfg, tutor=fake, input_fn=input_fn, output_fn=output_fn)
+    assert code == 0
+    assert not any("Kalender" in line for line in outputs)  # flourish skipped, no crash
+    assert fake.calls[0]["system_note"] is None

@@ -9,9 +9,11 @@ from __future__ import annotations
 
 from datetime import datetime
 
+from .bridge import BridgeClient, BridgeError
 from .commands import ChatContext, Direct, ToLLM, dispatch
 from .config import Config, SOUL_PATH, load_config
 from .llm import LLMError, Tutor, make_client, parse_correction
+from .scheduling import fetch_today_events, suggest_topic
 from .state import SessionState, SrsState
 from .tracker import Tracker
 
@@ -60,8 +62,11 @@ def run_chat(
         output_fn("⚠︎ HERR_VAULT ist nicht gesetzt — Obsidian-Notizen sind deaktiviert.")
     if tutor is None:
         tutor = Tutor(make_client(cfg.base_url), model=cfg.model, system_prompt=load_soul())
+    bridge = BridgeClient(cfg.bridge_url) if cfg.bridge_url else None
     tracker = Tracker(vault=vault, srs=srs)
-    ctx = ChatContext(srs=srs, session=session, tracker=tracker)
+    ctx = ChatContext(srs=srs, session=session, tracker=tracker, bridge=bridge)
+
+    startup_note = _topic_from_calendar(bridge, session, output_fn)
 
     output_fn(BANNER)
     history: list[dict[str, str]] = []
@@ -83,6 +88,8 @@ def run_chat(
             user_message, system_note = outcome.user_message, outcome.system_note
         else:
             user_message, system_note = raw, None
+        if system_note is None and startup_note:
+            system_note, startup_note = startup_note, None
 
         history.append({"role": "user", "content": user_message})
         try:
@@ -109,3 +116,24 @@ def run_chat(
     if tracker.session_turns:
         output_fn("Tschüss! Bis zum nächsten Mal. 👋")
     return 0
+
+
+def _topic_from_calendar(bridge: BridgeClient | None, session: SessionState, output_fn=print) -> str | None:
+    """P2 flourish: when no topic is set and the bridge is up, today's
+    calendar suggests the practice topic. Silent degradation — the TUI must
+    start instantly and identically when the bridge is down."""
+    if bridge is None or session.current_topic:
+        return None
+    try:
+        events = fetch_today_events(bridge)
+    except BridgeError:
+        return None
+    topic = suggest_topic(events, now=datetime.now())
+    if not topic:
+        return None
+    session.current_topic = topic
+    output_fn(f"📅 Aus deinem Kalender: heute üben wir „{topic}“.")
+    return (
+        f"Lucas startet eine neue Session. Aus seinem Kalender heute ergibt sich das "
+        f"Thema „{topic}“ — beginne damit: EIN kurzer Satz zum Thema + EINE einfache Frage an Lucas (A1-A2)."
+    )

@@ -1,8 +1,8 @@
 """Entry point for the `herr-claw` command (pyproject [project.scripts]).
 
-Typer-based CLI; subcommands are stable per AGENTS.md: `chat` (P1) and
-`sprechen` (P3). `cli()` wraps the Typer app so the console-script pin
-`herr-claw = "main:cli"` keeps working.
+Typer-based CLI; subcommands: `chat` (P1), `bridge` (P2, MCP on
+127.0.0.1:8765), `sprechen` (P3). `cli()` wraps the Typer app so the
+console-script pin `herr-claw = "main:cli"` keeps working.
 
 Loads the host .env in fallback mode via python-dotenv — the file's contents
 are never read or logged by hand; the OpenShell gateway provides the same
@@ -41,6 +41,14 @@ def chat() -> None:
     from agent.chat import run_chat
 
     raise typer.Exit(run_chat())
+
+
+@app.command()
+def bridge() -> None:
+    """MCP-Bridge starten: Apple Reminders/Calendar + Obsidian auf 127.0.0.1:8765 (Phase 2)."""
+    from herrclaw_bridge.server import run_server
+
+    raise typer.Exit(run_server())
 
 
 @app.command()

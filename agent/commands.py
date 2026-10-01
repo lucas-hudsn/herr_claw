@@ -10,6 +10,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date, timedelta
 
+from .bridge import BridgeClient
+from .scheduling import book_topic_session
 from .state import SessionState, SrsState
 from .tracker import Tracker
 
@@ -23,6 +25,7 @@ class ChatContext:
     srs: SrsState
     session: SessionState
     tracker: Tracker
+    bridge: BridgeClient | None = None  # None → /üben works, just doesn't book
 
 
 @dataclass
@@ -129,13 +132,15 @@ def dispatch(raw: str, ctx: ChatContext) -> Direct | ToLLM | None:
         if not arg:
             return Direct("Womit wollen wir üben? Zum Beispiel: /üben Bäckerei")
         ctx.session.current_topic = arg
-        return ToLLM(
-            user_message=f"Lass uns über das Thema „{arg}“ üben!",
-            system_note=(
-                f"Lucas will zum Thema „{arg}“ üben. Beginne die Übung: gib EINEN kurzen "
-                "Beispielsatz zum Thema (A1-A2) und stelle EINE einfache Frage an Lucas."
-            ),
+        system_note = (
+            f"Lucas will zum Thema „{arg}“ üben. Beginne die Übung: gib EINEN kurzen "
+            "Beispielsatz zum Thema (A1-A2) und stelle EINE einfache Frage an Lucas."
         )
+        if ctx.bridge is not None:
+            booking = book_topic_session(ctx.bridge, arg)
+            if booking:
+                system_note += f"\n[System] Buchung über die Bridge: {booking} — erwähne es kurz auf Deutsch."
+        return ToLLM(user_message=f"Lass uns über das Thema „{arg}“ üben!", system_note=system_note)
 
     return Direct(
         "Diesen Befehl kenne ich nicht. Diese kenne ich: " + " · ".join(COMMANDS)
