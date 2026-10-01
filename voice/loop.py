@@ -22,6 +22,7 @@ from agent.chat import _topic_from_calendar, load_soul
 from agent.commands import ChatContext, Direct, ToLLM, dispatch
 from agent.config import Config, load_config
 from agent.llm import LLMError, Tutor, make_client, parse_correction
+from agent.quiz import ensure_seeded
 from agent.state import SessionState, SrsState
 from agent.tracker import Tracker
 
@@ -127,6 +128,7 @@ def run_sprechen(
 ) -> int:
     cfg = cfg or load_config()
     srs = SrsState(cfg.srs_path)
+    ensure_seeded(srs)  # same seed import as chat — /quiz works in voice mode too
     session = SessionState.load(cfg.session_path)
     vault = None
     if cfg.vault_root:

@@ -138,15 +138,23 @@ def fetch_today_events(bridge: BridgeClient, now: datetime | None = None) -> lis
     return parse_freebusy(payload)
 
 
-def book_topic_session(bridge: BridgeClient, topic: str, now: datetime | None = None) -> str:
+def book_topic_session(
+    bridge: BridgeClient,
+    topic: str,
+    now: datetime | None = None,
+    events: list[dict] | None = None,
+) -> str:
     """Book the /üben session: Reminder always, Calendar event when a slot is
     free. Returns a German one-line status (the honest-failure variant keeps
-    the chat going when the bridge is down or a piece fails)."""
+    the chat going when the bridge is down or a piece fails). `events` skips
+    the freebusy fetch when the caller already has today's events."""
     now = now or datetime.now()
     lines: list[str] = []
     slot: datetime | None = None
     try:
-        slot = pick_free_slot(fetch_today_events(bridge, now), now)
+        if events is None:
+            events = fetch_today_events(bridge, now)
+        slot = pick_free_slot(events, now)
     except BridgeError as exc:
         lines.append(f"Keine Kalenderprüfung: {exc}")
 

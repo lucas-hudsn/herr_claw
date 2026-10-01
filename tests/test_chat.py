@@ -53,7 +53,7 @@ def test_three_turn_chat_persists_everything(config):
     assert any("Antwort Nummer 1" in line for line in outputs)
     assert any("Streak: 1" in line for line in outputs)  # /fortschritt recalled in-session
     assert any("2 Nachrichten, 1 Korrekturen" in line for line in outputs)  # at /fortschritt time
-    assert any("Phase 4" in line for line in outputs)
+    assert any("Frage 1/5" in line for line in outputs)  # P4: /quiz really quizzes now
     assert any("HERR_VAULT" in line for line in outputs)  # one-time warning
 
     # state/srs.json persisted

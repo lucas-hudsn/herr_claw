@@ -31,6 +31,7 @@ class Config:
     state_dir: Path = DEFAULT_STATE_DIR
     whisper_model: str = DEFAULT_WHISPER_MODEL
     mic_device: str = ""  # HERR_MIC_DEVICE override (name substring or index)
+    telegram_chat_id: str = ""  # HERR_TELEGRAM_CHAT_ID — the ONE chat the bot answers
 
     @property
     def srs_path(self) -> Path:
@@ -52,4 +53,5 @@ def load_config() -> Config:
         bridge_url=None if bridge.lower() in BRIDGE_OFF else (bridge or DEFAULT_BRIDGE_URL),
         whisper_model=os.environ.get("HERR_WHISPER_MODEL", "").strip() or DEFAULT_WHISPER_MODEL,
         mic_device=os.environ.get("HERR_MIC_DEVICE", "").strip(),
+        telegram_chat_id=os.environ.get("HERR_TELEGRAM_CHAT_ID", "").strip(),
     )

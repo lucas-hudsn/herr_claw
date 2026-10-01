@@ -8,10 +8,12 @@ dependencies = [
     "mcp>=2.2.0",
     # P1 (chat + memory): openai, python-dotenv, typer. P2 (Apple bridge): mcp, uvicorn,
     # pyobjc-framework-eventkit. P3 (voice): mlx-whisper, sounddevice, soundfile (already in).
+    # P4 (Telegram + daemon): pyyaml (agent/schedule.yaml — the ONE scheduler config).
     "mlx-whisper>=0.4.3",
     "openai>=1.100",
     "pyobjc-framework-eventkit>=12.2.2",
     "python-dotenv>=1.0",
+    "pyyaml>=6.0",
     "sounddevice>=0.5.6",
     "soundfile>=0.14.0",
     "typer>=0.12",

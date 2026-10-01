@@ -63,5 +63,24 @@ def test_chat_dispatches_to_run_chat(monkeypatch):
     assert called["ran"] is True
 
 
+def test_daemon_dispatches_to_run_daemon(monkeypatch):
+    called = {}
+
+    def fake_run_daemon():
+        called["ran"] = True
+        return 0
+
+    monkeypatch.setattr("agent.daemon.run_daemon", fake_run_daemon)
+    result = runner.invoke(main.app, ["daemon"])
+    assert result.exit_code == 0
+    assert called["ran"] is True
+
+
+def test_daemon_help_mentions_daily_loop():
+    result = runner.invoke(main.app, ["daemon", "--help"])
+    assert result.exit_code == 0
+    assert "Phase 4" in result.output
+
+
 def test_cli_wrapper_returns_exit_code_int():
     assert main.cli(["--help"]) == 0

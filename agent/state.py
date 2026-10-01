@@ -199,12 +199,17 @@ class SrsState:
 
 @dataclass
 class SessionState:
-    """session.json — light session/schedule state (ONE state path, second file)."""
+    """session.json — light session/schedule state (ONE state path, second file).
+
+    jobs_done records which daily-loop job last ran on which date
+    ("nudge" → "2026-10-02") so the daemon never fires a job twice a day,
+    even across restarts."""
 
     last_session_end: str = ""
     last_session_turns: int = 0
     current_topic: str = ""
     pause_until: date | None = None
+    jobs_done: dict[str, str] = field(default_factory=dict)
     path: Path = field(default_factory=lambda: Path("state") / "session.json")
 
     def save(self) -> None:
@@ -215,6 +220,7 @@ class SessionState:
             "last_session_turns": self.last_session_turns,
             "current_topic": self.current_topic,
             "pause_until": self.pause_until.isoformat() if self.pause_until else None,
+            "jobs_done": dict(self.jobs_done),
         }
         tmp = self.path.with_suffix(".json.tmp")
         tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -231,6 +237,9 @@ class SessionState:
             state.last_session_turns = int(raw.get("last_session_turns", 0))
             state.current_topic = raw.get("current_topic", "")
             state.pause_until = _parse_date(raw.get("pause_until"))
+            state.jobs_done = {
+                str(name): str(day) for name, day in (raw.get("jobs_done") or {}).items()
+            }
         except (json.JSONDecodeError, TypeError, ValueError):
             pass
         return state

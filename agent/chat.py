@@ -13,6 +13,7 @@ from .bridge import BridgeClient, BridgeError
 from .commands import ChatContext, Direct, ToLLM, dispatch
 from .config import Config, SOUL_PATH, load_config
 from .llm import LLMError, Tutor, make_client, parse_correction
+from .quiz import ensure_seeded
 from .scheduling import fetch_today_events, suggest_topic
 from .state import SessionState, SrsState
 from .tracker import Tracker
@@ -52,6 +53,7 @@ def run_chat(
 ) -> int:
     cfg = cfg or load_config()
     srs = SrsState(cfg.srs_path)
+    ensure_seeded(srs)  # seed list present on first run → /quiz works instantly
     session = SessionState.load(cfg.session_path)
     vault = None
     if cfg.vault_root:

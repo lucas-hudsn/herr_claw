@@ -1,8 +1,11 @@
 """The stable German slash commands (AGENTS.md — do not rename, no aliases).
 
-P1 implements the state-only commands for real (/fortschritt, /fehler,
-/pause, /erkläre, /üben topic steering); /quiz and /sprechen answer honestly
-that they arrive in P4/P3. Command output is TUI text, never spoken directly.
+P1 implemented the state-only commands (/fortschritt, /fehler, /pause,
+/erkläre, /üben topic steering); P4 replaces the /quiz stub with the real
+SRS quiz (agent/quiz.py) and answers /sprechen truthfully (P3 shipped it).
+While a quiz is active, plain text is graded as an answer and „ende“ quits —
+identically in chat, sprechen and Telegram, because all three go through
+dispatch().
 """
 
 from __future__ import annotations
@@ -10,6 +13,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date, timedelta
 
+from . import quiz as quiz_mod
 from .bridge import BridgeClient
 from .scheduling import book_topic_session
 from .state import SessionState, SrsState
@@ -26,6 +30,7 @@ class ChatContext:
     session: SessionState
     tracker: Tracker
     bridge: BridgeClient | None = None  # None → /üben works, just doesn't book
+    quiz: quiz_mod.QuizSession | None = None  # active quiz (P4); None when idle
 
 
 @dataclass
@@ -56,7 +61,7 @@ def progress_text(srs: SrsState, session: SessionState) -> str:
         avg = sum(e.level for e in srs.vocab.values()) / len(srs.vocab)
         lines.append(f"Vokabeln im SRS: {len(srs.vocab)} (Ø Level {avg:.1f})")
     else:
-        lines.append("Vokabeln: noch keine — kommen mit dem Quiz (Phase 4)")
+        lines.append("Vokabeln: noch keine — starte /quiz, dann legen wir los!")
     if srs.mistakes:
         last = srs.mistakes[-1]
         lines.append(f"Letzte Korrektur: „{last.example}“ → „{last.fix}“")
@@ -78,8 +83,20 @@ def fehler_text(srs: SrsState, limit: int = 5) -> str:
 
 
 def dispatch(raw: str, ctx: ChatContext) -> Direct | ToLLM | None:
-    """Return Direct (print), ToLLM (route through tutor) or None (normal chat)."""
+    """Return Direct (print), ToLLM (route through tutor) or None (normal chat).
+
+    While a quiz is active, plain text is graded as an answer and „ende“
+    (q/quit/stop/fertig/stopp) quits the quiz; slash commands still work."""
     if not raw.startswith("/"):
+        if ctx.quiz is not None and not ctx.quiz.finished:
+            if quiz_mod.normalize(raw) in quiz_mod.QUIT_WORDS:
+                return Direct(ctx.quiz.cancel())
+            outcome = Direct(ctx.quiz.answer(raw))
+            ctx.srs.add_message()
+            ctx.srs.touch_day()
+            if ctx.quiz.finished:
+                ctx.quiz = None
+            return outcome
         return None
     token, _, arg = raw[1:].partition(" ")
     cmd = token.strip().lower()
@@ -105,15 +122,27 @@ def dispatch(raw: str, ctx: ChatContext) -> Direct | ToLLM | None:
         )
 
     if cmd == "quiz":
-        if ctx.srs.vocab:
-            return Direct("Das Quiz kommt mit Phase 4 — deine Vokabeln warten schon! 📚")
-        return Direct(
-            "Das Quiz kommt bald (Phase 4). Danach üben wir mit echten Vokabeln! 📚"
+        if ctx.quiz is not None and not ctx.quiz.finished:
+            return Direct("Ein Quiz läuft schon — antworte einfach oder tippe „ende“.")
+        if arg:
+            try:
+                n = int(arg)
+            except ValueError:
+                return Direct("Wie viele Fragen? Zum Beispiel: /quiz 5")
+            if not 1 <= n <= quiz_mod.QUIZ_MAX:
+                return Direct(f"Zwischen 1 und {quiz_mod.QUIZ_MAX} Fragen, bitte. Zum Beispiel: /quiz 5")
+        else:
+            n = quiz_mod.QUIZ_DEFAULT
+        ctx.quiz = quiz_mod.start(ctx.srs, n=n)
+        intro = (
+            f"📚 Los geht's — {n} Fragen zu deinen Vokabeln "
+            "(„ende“ beendet das Quiz).\n\n"
         )
+        return Direct(intro + ctx.quiz.intro())
 
     if cmd == "sprechen":
         return Direct(
-            "Der Sprachmodus kommt mit Phase 3. Für jetzt: schreib mir einfach! ⌨️"
+            "Der Sprachmodus läuft im Terminal: herr-claw sprechen 🎙️ — hier schreiben wir weiter."
         )
 
     if cmd == "erkläre":

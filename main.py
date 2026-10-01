@@ -1,8 +1,9 @@
 """Entry point for the `herr-claw` command (pyproject [project.scripts]).
 
 Typer-based CLI; subcommands: `chat` (P1), `bridge` (P2, MCP on
-127.0.0.1:8765), `sprechen` (P3). `cli()` wraps the Typer app so the
-console-script pin `herr-claw = "main:cli"` keeps working.
+127.0.0.1:8765), `sprechen` (P3), `daemon` (P4, daily loop + Telegram).
+`cli()` wraps the Typer app so the console-script pin `herr-claw = "main:cli"`
+keeps working.
 
 Loads the host .env in fallback mode via python-dotenv — the file's contents
 are never read or logged by hand; the OpenShell gateway provides the same
@@ -57,6 +58,14 @@ def sprechen() -> None:
     from voice.loop import run_sprechen
 
     raise typer.Exit(run_sprechen())
+
+
+@app.command()
+def daemon() -> None:
+    """Täglich-Schleife: Nudge/Quiz/Recap + Telegram (Phase 4)."""
+    from agent.daemon import run_daemon
+
+    raise typer.Exit(run_daemon())
 
 
 def cli(argv: list[str] | None = None) -> int:

@@ -18,8 +18,29 @@ PROGRESS_FILE = "Deutsch/progress.md"
 FEHLER_FILE = "Deutsch/fehler.md"
 DAILY_NOTE_FMT = "Daily notes/%Y-%m-%d-deutsch.md"
 
-_PROGRESS_HEADER = "# Deutsch — Fortschritt\n\n"
-_FEHLER_HEADER = "# Deutsch — Fehlerlog\n\n"
+PROGRESS_HEADER = "# Deutsch — Fortschritt\n\n"
+FEHLER_HEADER = "# Deutsch — Fehlerlog\n\n"
+
+
+def safe_append(vault: Vault | None, rel_path: str, text: str, header: str | None = None) -> bool:
+    """Append; write `header` first when the file doesn't exist yet. On IO
+    problems warn once — state/ keeps persisting either way. VaultDenied is
+    an OSError too. Returns False when the write did not happen."""
+    if vault is None:
+        return False
+    if header is not None:
+        try:
+            vault.read(rel_path)
+        except FileNotFoundError:
+            vault.append(rel_path, header)
+        except OSError:
+            pass  # file exists but unreadable — append will surface it
+    try:
+        vault.append(rel_path, text)
+        return True
+    except OSError as exc:
+        print(f"⚠︎ Obsidian-Schreibzugriff fehlgeschlagen ({exc}) — Notizen deaktiviert.")
+        return False
 
 
 class Tracker:
@@ -38,10 +59,11 @@ class Tracker:
         if not (self.vault and is_new):
             return
         stamp = datetime.now().strftime("%Y-%m-%d %H:%M")
-        self._safe_append(
+        safe_append(
+            self.vault,
             FEHLER_FILE,
             f"- {stamp} — Deine Version: „{example}“ → Richtig: „{fix}“",
-            header=_FEHLER_HEADER,
+            header=FEHLER_HEADER,
         )
 
     def end_session(self, topic: str = "") -> None:
@@ -67,8 +89,9 @@ class Tracker:
         )
         if topic:
             daily += f"- Thema: {topic}\n"
-        self._safe_append(daily_rel, daily)
-        self._safe_append(
+        safe_append(self.vault, daily_rel, daily)
+        safe_append(
+            self.vault,
             PROGRESS_FILE,
             (
                 f"- {now.strftime('%Y-%m-%d')} — Sitzung {now.strftime('%H:%M')}: "
@@ -77,23 +100,11 @@ class Tracker:
                 f"Gesamt: {self.srs.totals.messages} Nachrichten, "
                 f"{self.srs.totals.corrections} Korrekturen"
             ),
-            header=_PROGRESS_HEADER,
+            header=PROGRESS_HEADER,
         )
 
     def _safe_append(self, rel_path: str, text: str, header: str | None = None) -> None:
-        """Append; on IO problems warn once and disable vault writes for the
-        session (state/ keeps persisting). VaultDenied is an OSError too."""
-        if self.vault is None:
-            return
-        if header is not None:
-            try:
-                self.vault.read(rel_path)
-            except FileNotFoundError:
-                self.vault.append(rel_path, header)
-            except OSError:
-                pass  # file exists but unreadable — append will surface it
-        try:
-            self.vault.append(rel_path, text)
-        except OSError as exc:
-            print(f"⚠︎ Obsidian-Schreibzugriff fehlgeschlagen ({exc}) — Notizen deaktiviert.")
+        """Delegate to safe_append; on failure disable vault writes for the
+        session (state/ keeps persisting)."""
+        if not safe_append(self.vault, rel_path, text, header=header):
             self.vault = None

@@ -50,15 +50,54 @@ def test_pause_defaults_to_one_day(srs, session):
     assert session.pause_until is not None
 
 
-def test_quiz_is_honest_stub(srs, session):
-    out = dispatch("/quiz", make_ctx(srs, session))
+def test_quiz_starts_and_grades_answers_p4(srs, session):
+    ctx = make_ctx(srs, session)
+    out = dispatch("/quiz 2", ctx)
     assert isinstance(out, Direct)
-    assert "Phase 4" in out.text
+    assert "Frage 1/2" in out.text
+    assert ctx.quiz is not None and len(ctx.quiz.questions) == 2
+
+    # the seed list is the only quiz content (anti-hallucination)
+    assert all(q.key in srs.vocab for q in ctx.quiz.questions)
+
+    # plain text is graded while the quiz is active; SRS applies the review
+    first = ctx.quiz.questions[0]
+    out = dispatch(first.accepted[0], ctx)
+    assert isinstance(out, Direct) and "✅" in out.text
+    assert srs.vocab[first.key].level == 2
+
+    # second answer wrong → display shows article + plural, miss counted
+    second = ctx.quiz.questions[1]
+    out = dispatch("garbage nonsense", ctx)
+    assert "❌ Leider falsch" in out.text and second.display in out.text
+    assert srs.vocab[second.key].misses == 1
+    assert ctx.quiz is None  # finished → plain text flows to the tutor again
+    assert dispatch("Guten Tag!", ctx) is None
 
 
-def test_sprechen_points_to_phase3(srs, session):
+def test_quiz_quit_word_ends_early(srs, session):
+    ctx = make_ctx(srs, session)
+    dispatch("/quiz 5", ctx)
+    out = dispatch("ende", ctx)
+    assert "Quiz beendet" in out.text
+
+
+def test_quiz_no_double_start_and_arg_validation(srs, session):
+    ctx = make_ctx(srs, session)
+    dispatch("/quiz", ctx)
+    out = dispatch("/quiz 3", ctx)
+    assert "läuft schon" in out.text
+
+    fresh = make_ctx(srs, session)
+    assert "Wie viele Fragen" in dispatch("/quiz später", fresh).text
+    assert "1 und 20" in dispatch("/quiz 99", fresh).text
+    assert fresh.quiz is None
+
+
+def test_sprechen_points_to_the_terminal(srs, session):
     out = dispatch("/sprechen", make_ctx(srs, session))
-    assert "Phase 3" in out.text
+    assert isinstance(out, Direct)
+    assert "herr-claw sprechen" in out.text
 
 
 def test_erklaere_routes_to_llm_with_english_note(srs, session):
