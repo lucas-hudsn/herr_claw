@@ -18,3 +18,6 @@ AGENTS.md
 
 # Runtime state (srs.json, session.json) — never published
 state/
+
+# ZCode session artifacts
+.zcode/
