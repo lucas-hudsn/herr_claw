@@ -1,10 +1,12 @@
 # Herr Claw 🤖
 
 A long-running, sandboxed **German-tutor agent** for the NVIDIA Claw Agent
-Challenge. Herr Claw chats with you in simple German (A1–A2), corrects your
-mistakes gently, remembers your progress, and logs sessions to your Obsidian
-vault — designed to schedule practice around your life (Apple
-Calendar/Reminders), run spaced repetition, and eventually talk and listen.
+Challenge — for anyone at A1–A2 who lives in Apple Calendar, Reminders and
+Obsidian and wants a daily five-minute German habit. Herr Claw chats with you
+in simple German (text or voice), corrects your mistakes gently, quizzes you
+with spaced repetition, logs your progress to Obsidian, and runs its own day
+on a scheduler: morning nudge, midday micro-quiz, evening recap — nudging you
+on Telegram.
 
 Built for macOS (Apple Silicon only, by design), Python 3.14, managed with
 [`uv`](https://docs.astral.sh/uv/). Inference runs on
@@ -16,11 +18,18 @@ via the OpenAI-compatible endpoint at `integrate.api.nvidia.com`.
 - **Text chat TUI** (`herr-claw chat`): a German-only tutor loop with a
   persona prompt (`agent/SOUL.md`), rolling history, and soft corrections in
   the fixed template `Richtig: … / Deine Version: …`.
+- **Voice mode** (`herr-claw sprechen`): push-to-talk (space/enter) →
+  mlx-whisper `base` (language locked to `de`, 16 kHz mono, silence-stopped
+  ≤5 s) → Nemotron reply → `say -v Anna` (markdown and emoji stripped before
+  speaking). The MacBook mic is picked explicitly — iPhone Continuity ghost
+  mics are skipped — and the per-turn latency is printed live against the
+  <5 s budget. Typed commands still work next to the mic; Ctrl-C quits and
+  saves state.
 - **German slash commands**: `/üben`, `/quiz`, `/fehler`, `/fortschritt`,
-  `/erkläre`, `/pause`, `/sprechen`. `/erkläre` and `/üben` steer the tutor
-  via system notes; `/fortschritt`, `/fehler`, `/pause` are answered
-  directly from local state; `/quiz` and `/sprechen` honestly say they are
-  not here yet.
+  `/erkläre`, `/pause`, `/sprechen` — identical behavior in the TUI, voice
+  mode, and Telegram because all three go through one `dispatch()`.
+  `/erkläre` and `/üben` steer the tutor via system notes; the rest are
+  answered directly from local state.
 - **`/üben` books real practice time** (with the bridge running): it checks
   today's calendar for a free 15-minute slot (quarter-hour grid, 08:00–22:00,
   never overlapping real events), creates an Apple Reminder
@@ -32,6 +41,30 @@ via the OpenAI-compatible endpoint at `integrate.api.nvidia.com`.
   (Anmeldung → Behörden, Bäckerei → Beim Bäcker, Gym → Sport, …). No
   keyword match → no flourish — Herr Claw never invents a calendar
   connection that isn't there.
+- **Vocabulary quiz** (`/quiz [n]`): every question is generated from
+  stored data only — the 100-word A1 seed list
+  (`seed/vocab_a1_100.csv`: food, apartment, small talk, Berlin daily life)
+  plus words already in the SRS. The LLM never invents quiz content.
+  Five question types (DE→EN, EN→DE, cloze, article der/die/das, plural),
+  nouns always shown with article + plural, lenient answer checking
+  (case/umlaut/punctuation). Every answer updates the SM-2-lite schedule:
+  a hit levels up, a miss drops a level and counts. `„ende"` quits early.
+- **The daemon** (`herr-claw daemon`) is the ONE scheduler, configured only
+  by `agent/schedule.yaml`: **08:00** morning nudge — read the calendar,
+  derive the day's topic (calendar keyword first, else the weakest vocab's
+  theme), book a free 15-minute slot (Reminder + Calendar event via the
+  bridge), send „Guten Morgen! ☕" to Telegram; **12:30** micro-quiz —
+  3 questions from your weakest vocab, only if the morning nudge ran;
+  **20:00** recap — append the daily note + `Deutsch/progress.md` to
+  Obsidian, mark the practice reminder complete, confirm on Telegram.
+  Job dedup lives in `session.json` (a restart never re-fires a job),
+  jobs missed earlier today catch up oldest-first on startup, `/pause`
+  is respected, and a failed job retries without killing the loop.
+- **Telegram**: the daemon long-polls the Bot API (`api.telegram.org` only,
+  stdlib client) and answers the same German commands from your phone.
+  It answers exactly ONE chat (`HERR_TELEGRAM_CHAT_ID`); other chats are
+  logged and ignored, never answered. A restart skips the update backlog,
+  so old commands never re-fire.
 - **MCP bridge** (`herr-claw bridge`): exposes seven tools over
   Streamable-HTTP MCP on `127.0.0.1:8765` — `reminders.{list,add,complete}`
   (AppleScript, pinned to the `Deutsch` list), `calendar.{freebusy,add}`
@@ -41,7 +74,7 @@ via the OpenAI-compatible endpoint at `integrate.api.nvidia.com`.
   (`agent/bridge.py`) is the only path, so allowlist enforcement and audit
   live in exactly one place. The bridge needs no secrets, only `HERR_VAULT`.
 - **Learning state** in `state/`: mistake log (deduplicated with counts),
-  daily streak, session/message/correction totals, and an SM-2-lite spaced
+  daily streak, session/message/correction totals, and the SM-2-lite spaced
   repetition engine (L1→1d, L2→3d, L3→7d, L4→14d, L5→30d; a miss drops one
   level). Both `state/srs.json` and `state/session.json` are written
   atomically; a corrupt `srs.json` is backed up, never silently dropped.
@@ -57,15 +90,17 @@ via the OpenAI-compatible endpoint at `integrate.api.nvidia.com`.
   that strips reasoning blocks and markdown so answers stay short and
   speakable (they will be read aloud).
 
-Not yet: voice mode (next — STT/TTS deps are already in), vocabulary quiz,
-Telegram, sandbox policy wiring.
+Not yet: sandbox network-policy wiring for the bridge endpoint and the
+`state/` bind-mount (the governance evidence pass), the Sunday weekly
+review, and the demo video.
 
 ## Requirements
 
 - macOS on Apple Silicon (uses `say`, Apple Reminders/Calendar, mlx-whisper)
 - Python 3.14+ and [`uv`](https://docs.astral.sh/uv/)
 - An NVIDIA Build API key (https://build.nvidia.com)
-- Optional: an Obsidian vault for progress notes
+- Optional: a microphone for voice mode, an Obsidian vault for progress
+  notes, and a Telegram bot token + your chat id for the daemon's nudges
 - For the bridge: macOS Automation permission for Reminders + Calendar, and
   EventKit calendar access (first call per context triggers the prompt once)
 
@@ -82,40 +117,46 @@ and holds live secrets — never commit it):
 | Variable | Purpose |
 | --- | --- |
 | `NVIDIA_API_KEY` | NVIDIA Build API key for Nemotron inference (required) |
-| `TELEGRAM_BOT_TOKEN` | Telegram bot token (used once the Telegram bot lands) |
-| `HERR_TELEGRAM_CHAT_ID` | The single allowed Telegram chat |
+| `TELEGRAM_BOT_TOKEN` | Telegram bot token for the daemon (`herr-claw daemon`) |
+| `HERR_TELEGRAM_CHAT_ID` | The single allowed Telegram chat — the only one the bot answers |
 | `HERR_VAULT` | Path to your Obsidian vault; unset disables vault tools/writes |
 | `HERR_BRIDGE_URL` | MCP bridge endpoint; empty → `http://127.0.0.1:8765/mcp`, `off` disables bridge calls |
 | `HERR_MODEL` | Optional model override |
 | `HERR_NVIDIA_BASE_URL` | Optional endpoint override |
-| `HERR_WHISPER_MODEL` | Whisper model for voice mode (default `base`) |
+| `HERR_WHISPER_MODEL` | Whisper model for voice mode (default `base` — never `tiny`, too weak for German) |
+| `HERR_MIC_DEVICE` | Optional input device override (name substring or index); auto-pick skips iPhone/iPad Continuity mics |
 
 ## Usage
 
 ```sh
-uv run herr-claw            # help
 uv run herr-claw chat       # text chat in the terminal
 uv run herr-claw bridge     # MCP bridge on 127.0.0.1:8765 (second terminal)
+uv run herr-claw sprechen   # voice mode: mic → Whisper (de) → reply → Anna
+uv run herr-claw daemon     # daily loop + Telegram bot (leave it running)
 ```
 
 Run `herr-claw bridge` in a second terminal when you want `/üben` to book
-real Reminders/Calendar entries and chat to pick up the day's topic from
-your calendar. Everything works without it — chat simply skips the booking.
+real Reminders/Calendar entries, chat to pick up the day's topic from your
+calendar, and the daemon to write recaps. Everything works without it —
+chat simply skips the booking, and the daemon says so honestly. The daemon
+additionally needs `TELEGRAM_BOT_TOKEN` + `HERR_TELEGRAM_CHAT_ID` (it has
+no reason to exist without the phone) and `HERR_VAULT` for the recap.
 
 In chat, talk to Herr Claw in German and use the commands:
 
 | Command | What it does |
 | --- | --- |
 | `/üben <Thema>` | Practice a topic (e.g. `/üben Bäckerei`) — with the bridge: books Reminder + 15-min Calendar slot |
-| `/quiz` | Vocabulary quiz — coming soon |
+| `/quiz <n>` | Vocabulary quiz from the 100-word seed + your SRS state (default 5 questions, `„ende"` quits) |
 | `/fehler` | Show your last mistakes with corrections |
 | `/fortschritt` | Streak, totals, SRS vocab, current topic/pause |
 | `/erkläre <Wort>` | Explain a word in English, examples in German |
-| `/pause <Tage>` | Pause practice for a while |
-| `/sprechen` | Voice mode — coming soon |
+| `/pause <Tage>` | Pause practice for a while (the daemon skips its jobs too) |
+| `/sprechen` | Start voice mode (runs in the terminal: `herr-claw sprechen`) |
 
 Leave the chat with `Ctrl-D`; the session summary, streak, and any new
-mistakes are persisted then.
+mistakes are persisted then. In the daemon, the same commands arrive as
+Telegram messages and the replies land back in the chat.
 
 ## How it fits together
 
@@ -123,14 +164,22 @@ mistakes are persisted then.
 main.py                 CLI entry (`herr-claw` script): env load + Typer app
 agent/
   SOUL.md               Tutor persona/system prompt (German, A1–A2, TTS-safe)
+  schedule.yaml         THE scheduler config (the daemon's three job times)
   config.py             Config from env; ONE state path: <repo>/state/
   chat.py               The read–reply TUI loop, history window, persistence
   commands.py           The stable German slash commands (dispatch → direct or LLM)
+  quiz.py               SRS quiz engine — seed-constrained, 5 question types
+  telegram.py           Bot API client (long poll, single-chat allowlist, no token in logs)
+  daemon.py             The ONE scheduler: 08:00 nudge · 12:30 quiz · 20:00 recap + Telegram
   llm.py                Nemotron client, sanitization, correction parsing
   bridge.py             Sync MCP client to the bridge — the ONLY Apple/vault path for agent code
   scheduling.py         Free-slot picker, calendar-title → topic map, /üben booking flow
   state.py              srs.json + session.json (atomic, self-healing)
   tracker.py            Writes session summaries/mistakes to the vault
+voice/
+  stt.py                mlx-whisper base (de): mic capture, silence-stopped, MacBook mic picked
+  tts.py                `say -v Anna` with markdown/emoji stripped, blocks until done
+  loop.py               The sprechen push-to-talk loop (same state + commands as chat)
 herrclaw_bridge/
   server.py             MCP Streamable-HTTP server on 127.0.0.1:8765 (7 tools, glue only)
   vault.py              Path-scoped, append-only Obsidian access (the allowlist IS the governance)
@@ -139,15 +188,20 @@ herrclaw_bridge/
   applescript.py        The single osascript gateway + AppleScript string escaping
   dates.py / errors.py  Local-time ISO parsing; BridgeError vs BridgeDenied
   audit.py              JSONL audit log for every governed call
+seed/
+  vocab_a1_100.csv      100 A1 words (article + plural, themes, cloze examples)
 state/                  Runtime state (gitignored): srs.json, session.json
-tests/                  pytest suite for all of the above (143 tests)
+tests/                  pytest suite for all of the above (251 tests)
 ```
 
 A chat turn flows: input → command dispatch (direct answer, or message plus
 optional system note — `/üben` books through the bridge here) → Nemotron
 reply → markdown/reasoning sanitization → correction extraction → state
 update; vault writes happen when corrections are logged and when the session
-ends.
+ends. The voice loop and the daemon reuse exactly those pieces — same state
+path, same quiz engine, same `dispatch()` — so what you practice in the
+terminal, speak into the mic, and answer on the phone is one continuous
+learning state.
 
 ## Safety and governance
 
@@ -173,9 +227,14 @@ ends.
 - **Secrets stay in the environment.** `NVIDIA_API_KEY` and
   `TELEGRAM_BOT_TOKEN` are read from the environment only (`.env` in
   host-fallback mode); they are never hardcoded, logged, or written into
-  agent-readable state. The bridge itself needs no secrets.
-- **Network surface.** The tutor talks only to `integrate.api.nvidia.com`;
-  the bridge is local-only on `127.0.0.1:8765`.
+  agent-readable state. The bridge itself needs no secrets, and the
+  Telegram bot answers exactly one chat id — everyone else is ignored.
+- **Network surface.** The tutor talks only to `integrate.api.nvidia.com`
+  and — in daemon mode — to `api.telegram.org`; the bridge is local-only
+  on `127.0.0.1:8765`.
+- **Quiz content is constrained.** Questions are generated only from the
+  seed CSV and words already in the SRS — quiz vocabulary is data, never
+  model output, so the tutor cannot invent words you never learned.
 
 ## Tests
 
@@ -183,26 +242,31 @@ ends.
 uv run pytest
 ```
 
-143 tests. The suite covers the chat loop, command dispatch (including
-`/üben` booking against a fake bridge), correction parsing and
-sanitization, SRS/streak/session state, the CLI, the vault allowlist
-(including denial paths), the slot picker and topic map as pure functions,
-AppleScript generation and escaping, the EventKit components against a fake
+251 tests (plus one opt-in live STT test:
+`HERR_LIVE_STT=1 uv run pytest tests/test_stt.py -k live`). The suite
+covers the chat loop, command dispatch (including `/üben` booking against a
+fake bridge and the real `/quiz` flow with SRS updates), the quiz engine
+(seed integrity, question types, lenient answer matching, weakest-first
+selection), the Telegram client (retries, chunking, 409 conflicts, and
+token hygiene — error messages must never contain it), the daemon (schedule
+loading, job dedup and catch-up, all three §4.1 jobs against fake
+bridge/Telegram, graceful Ctrl-C), correction parsing and sanitization,
+SRS/streak/session state, the CLI, the vault allowlist (including denial
+paths), the slot picker and topic map as pure functions, AppleScript
+generation and escaping, the EventKit components against a fake
 pyobjc-shaped EventKit (including the AppleScript fallback and denied
 foreign calendars), and the MCP bridge end-to-end: a real uvicorn server +
 real MCP client over HTTP with the Apple backends faked at module level —
-no test ever touches the real vault, Reminders, Calendar, or
+no test ever touches the real vault, Reminders, Calendar, Telegram, or
 `~/.herr-claw`.
 
 ## Roadmap
 
-1. **Voice mode** (`/sprechen`): mic → STT (mlx-whisper `base`, language
-   locked to `de`, MacBook mic selected explicitly) → reply → TTS
-   (`say -v Anna`, markdown stripped), round trip under 5 s. STT/TTS
-   dependencies are already installed.
-2. **Vocabulary quiz** (`/quiz`): seeded A1 word list + SRS scheduling,
-   nouns always with article and plural.
-3. **Telegram**: the same tutor over a token-gated, single-chat bot.
-4. **Daily loop + governance evidence**: 08:00 nudge (freebusy → slot →
-   Reminder → Telegram), 12:30 micro-quiz, 20:00 recap; sandbox network
-   policy additions for the bridge endpoint.
+1. **Sandbox governance evidence**: OpenShell policy additions (allow the
+   bridge endpoint and the NVIDIA/Telegram egress, deny the rest),
+   bind-mount `./state/` into the sandbox — the deny-moment demo works in
+   both sandbox and host-only modes either way.
+2. **Overnight evidence**: leave the daemon running for real nights so the
+   08:00 nudge, booking, and 20:00 recap artifacts accumulate on their own.
+3. **v2 ideas**: Nemotron omni audio-in for the voice loop once German
+   accuracy suffices, the Sunday weekly review, pronunciation scoring.
