@@ -1,25 +1,46 @@
 """The stable German slash commands (AGENTS.md — do not rename, no aliases).
 
 P1 implemented the state-only commands (/fortschritt, /fehler, /pause,
-/erkläre, /üben topic steering); P4 replaces the /quiz stub with the real
+/erkläre, /üben topic steering); P4 replaced the /quiz stub with the real
 SRS quiz (agent/quiz.py) and answers /sprechen truthfully (P3 shipped it).
-While a quiz is active, plain text is graded as an answer and „ende“ quits —
-identically in chat, sprechen and Telegram, because all three go through
-dispatch().
+v0.5 adds /tag (today's tailored phrase plan) and /erfolge (report a phrase
+you used successfully) — SPEC §4.2. All frontends (chat, sprechen,
+Telegram) go through dispatch(), so every command behaves identically
+everywhere. While a quiz is active, plain text is graded as an answer and
+„ende“ quits.
+
+note_user_exchange() is the ONE bookkeeping path every frontend calls after
+a tutor exchange: correction extraction, and success recording — a reported
+day-plan phrase lands in state/memory.md, reinforces the matching SRS
+entries, and is appended to Deutsch/progress.md (SPEC §4.1, 20:00 job).
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import date, timedelta
+import random
+from dataclasses import dataclass, field
+from datetime import date, datetime, timedelta
 
 from . import quiz as quiz_mod
-from .bridge import BridgeClient
-from .scheduling import book_topic_session
+from .bridge import BridgeClient, BridgeError
+from .llm import parse_correction
+from .memory import MemoryState
+from .phrases import DayPlan, build_day_plan, phrase_vocab_hits, render_tag
+from .scheduling import book_topic_session, fetch_today_events
 from .state import SessionState, SrsState
-from .tracker import Tracker
+from .tracker import PROGRESS_FILE, PROGRESS_HEADER, Tracker, safe_append
 
-COMMANDS = ("/üben", "/quiz", "/fehler", "/fortschritt", "/erkläre", "/pause", "/sprechen")
+COMMANDS = (
+    "/üben",
+    "/quiz",
+    "/fehler",
+    "/erfolge",
+    "/tag",
+    "/fortschritt",
+    "/erkläre",
+    "/pause",
+    "/sprechen",
+)
 
 MAX_PAUSED_DAYS = 365
 
@@ -31,6 +52,66 @@ class ChatContext:
     tracker: Tracker
     bridge: BridgeClient | None = None  # None → /üben works, just doesn't book
     quiz: quiz_mod.QuizSession | None = None  # active quiz (P4); None when idle
+    memory: MemoryState | None = None  # state/memory.md journal (v0.5)
+    rng: random.Random | None = None
+
+    def today_plan(self) -> DayPlan | None:
+        """The Morgen-Brief when it was built today, else None."""
+        plan = DayPlan.from_json(self.session.day_plan)
+        if plan and plan.date == date.today().isoformat() and plan.phrases:
+            return plan
+        return None
+
+    def build_plan(self, topic: str | None = None) -> DayPlan:
+        """(Re)build today's plan with the same rules as the Morgen-Brief:
+        bridge events when readable, else honest fallback (SPEC §4.6)."""
+        events: list[dict] = []
+        if self.bridge is not None:
+            try:
+                events = fetch_today_events(self.bridge)
+            except BridgeError:
+                events = []
+        plan = build_day_plan(
+            events=events,
+            now=datetime.now(),
+            srs=self.srs,
+            memory=self.memory,
+            rng=self.rng,
+            topic=topic,
+        )
+        self.session.day_plan = plan.to_json()
+        self.session.save()
+        return plan
+
+    def record_success(self, phrase: str, context: str = "") -> bool:
+        """One reported success → memory journal + SRS reinforcement +
+        Deutsch/progress.md (append-only, same allowlist). Returns True when
+        the phrase is new in the journal."""
+        if not context:
+            plan = self.today_plan()
+            context = self.session.current_topic or (plan.topic if plan else "")
+        recorded = False
+        if self.memory is not None:
+            recorded = self.memory.record_success(phrase, context=context)
+            if context:
+                self.memory.record_interest(context, landed=True)
+            self.memory.save()
+        # Reinforce every SRS word the phrase contains (word-boundary match,
+        # umlaut/punctuation-lenient like the quiz checker).
+        norm = quiz_mod.normalize(phrase)
+        for key in self.srs.vocab:
+            if phrase_vocab_hits(norm, key):
+                self.srs.apply_review(key, correct=True)
+        if self.srs.vocab:
+            self.srs.save()
+        stamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+        safe_append(
+            self.tracker.vault,
+            PROGRESS_FILE,
+            f"- {stamp} — Erfolg: „{phrase.strip()}“" + (f" · Thema: {self.session.current_topic}" if self.session.current_topic else ""),
+            header=PROGRESS_HEADER,
+        )
+        return recorded
 
 
 @dataclass
@@ -42,10 +123,15 @@ class Direct:
 
 @dataclass
 class ToLLM:
-    """Send a message through the tutor, with optional extra system note."""
+    """Send a message through the tutor, with optional extra system note.
+
+    success_phrases carries phrases the user just reported via /erfolge —
+    the frontend records them after the exchange (the gentle correction may
+    adjust the German first, but the success counts either way)."""
 
     user_message: str
     system_note: str | None = None
+    success_phrases: tuple[str, ...] = field(default_factory=tuple)
 
 
 def progress_text(srs: SrsState, session: SessionState) -> str:
@@ -82,6 +168,60 @@ def fehler_text(srs: SrsState, limit: int = 5) -> str:
     return "\n".join(lines)
 
 
+def erfolge_text(ctx: ChatContext) -> str:
+    """/erfolge without an argument — the journal + today's prompt."""
+    memory = ctx.memory
+    lines = ["🌟 Deine Erfolge:"]
+    if memory is None or not memory.erfolge:
+        lines.append(
+            "Noch keine aufgezeichnet. Sag mir, welche Phrase du heute benutzt hast: /erfolge <Satz>"
+        )
+        return "\n".join(lines)
+    for success in memory.erfolge[-5:][::-1]:
+        times = f" ({success.count}×)" if success.count > 1 else ""
+        context = f" · {success.context}" if success.context else ""
+        lines.append(f"„{success.phrase}“{times}{context}")
+    plan = ctx.today_plan()
+    if plan:
+        lines.append("")
+        lines.append("Welche der heutigen Phrasen hast du benutzt? /erfolge <Satz>")
+    return "\n".join(lines)
+
+
+def reported_phrases(text: str, ctx: ChatContext) -> list[str]:
+    """Day-plan phrases the user's message mentions (lenient match, like the
+    quiz checker) — the conversational path of the evening Erfolgs-Check."""
+    plan = ctx.today_plan()
+    if plan is None:
+        return []
+    norm_text = quiz_mod.normalize(text)
+    hits = []
+    for phrase in plan.phrases:
+        norm_phrase = quiz_mod.normalize(phrase)
+        if len(norm_phrase) >= 8 and norm_phrase in norm_text:
+            hits.append(phrase)
+    return hits
+
+
+def note_user_exchange(
+    ctx: ChatContext,
+    user_text: str,
+    reply: str,
+    extra_successes: tuple[str, ...] = (),
+) -> None:
+    """ONE post-exchange bookkeeping path for all frontends: counts the turn,
+    logs corrections from the SOUL template, records reported successes."""
+    ctx.tracker.note_exchange()
+    ctx.srs.add_message()
+    ctx.srs.touch_day()
+    correction = parse_correction(reply)
+    if correction:
+        fix, example = correction
+        ctx.tracker.log_correction(example=example, fix=fix)
+    for phrase in dict.fromkeys([*extra_successes, *reported_phrases(user_text, ctx)]):
+        ctx.record_success(phrase)
+
+
 def dispatch(raw: str, ctx: ChatContext) -> Direct | ToLLM | None:
     """Return Direct (print), ToLLM (route through tutor) or None (normal chat).
 
@@ -107,6 +247,24 @@ def dispatch(raw: str, ctx: ChatContext) -> Direct | ToLLM | None:
 
     if cmd == "fehler":
         return Direct(fehler_text(ctx.srs))
+
+    if cmd == "tag":
+        plan = ctx.today_plan() or ctx.build_plan()
+        return Direct(render_tag(plan))
+
+    if cmd == "erfolge":
+        if not arg:
+            return Direct(erfolge_text(ctx))
+        return ToLLM(
+            user_message=f"Ich habe heute diesen Satz benutzt: „{arg}“",
+            system_note=(
+                "Lucas hat diesen Satz heute wirklich benutzt und meldet ihn als Erfolg. "
+                "Ist der Satz korrekt (A1-A2)? Wenn ja: bestätige kurz und freu dich. "
+                "Wenn nein: korrigiere sanft in einer Zeile nach dem Muster "
+                "'Richtig: … / Deine Version: …'. Antworte kurz (max. 2 Sätze)."
+            ),
+            success_phrases=(arg,),
+        )
 
     if cmd == "pause":
         try:

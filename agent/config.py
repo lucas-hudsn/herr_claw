@@ -43,6 +43,10 @@ class Config:
     def session_path(self) -> Path:
         return self.state_dir / "session.json"
 
+    @property
+    def memory_path(self) -> Path:
+        return self.state_dir / "memory.md"
+
 
 def load_config() -> Config:
     vault = os.environ.get("HERR_VAULT", "").strip()

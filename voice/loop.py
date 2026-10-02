@@ -18,10 +18,11 @@ import tty
 from datetime import datetime
 
 from agent.bridge import BridgeClient
-from agent.chat import _topic_from_calendar, load_soul
-from agent.commands import ChatContext, Direct, ToLLM, dispatch
+from agent.chat import _topic_from_calendar, system_prompt_with_memory
+from agent.commands import ChatContext, Direct, ToLLM, dispatch, note_user_exchange
 from agent.config import Config, load_config
-from agent.llm import LLMError, Tutor, make_client, parse_correction
+from agent.llm import LLMError, Tutor, make_client
+from agent.memory import MemoryState
 from agent.quiz import ensure_seeded
 from agent.state import SessionState, SrsState
 from agent.tracker import Tracker
@@ -130,6 +131,7 @@ def run_sprechen(
     srs = SrsState(cfg.srs_path)
     ensure_seeded(srs)  # same seed import as chat — /quiz works in voice mode too
     session = SessionState.load(cfg.session_path)
+    memory = MemoryState.load(cfg.memory_path)
     vault = None
     if cfg.vault_root:
         from herrclaw_bridge.vault import Vault
@@ -142,7 +144,7 @@ def run_sprechen(
             tutor = Tutor(
                 make_client(cfg.base_url),
                 model=cfg.model,
-                system_prompt=load_soul(),
+                system_prompt=system_prompt_with_memory(memory),
                 max_tokens=VOICE_MAX_TOKENS,
             )
         except LLMError as exc:
@@ -150,7 +152,7 @@ def run_sprechen(
             return 1
     bridge = BridgeClient(cfg.bridge_url) if cfg.bridge_url else None
     tracker = Tracker(vault=vault, srs=srs)
-    ctx = ChatContext(srs=srs, session=session, tracker=tracker, bridge=bridge)
+    ctx = ChatContext(srs=srs, session=session, tracker=tracker, bridge=bridge, memory=memory)
 
     if transcribe is None:
         stt = Transcriber(cfg.whisper_model)
@@ -194,13 +196,7 @@ def run_sprechen(
             return None
         history.append({"role": "assistant", "content": reply})
         output_fn(f"Herr Claw: {reply}")
-        tracker.note_exchange()
-        srs.add_message()
-        srs.touch_day()
-        correction = parse_correction(reply)
-        if correction:
-            fix, example = correction
-            tracker.log_correction(example=example, fix=fix)
+        note_user_exchange(ctx, user_message, reply)
         if speak:
             speaker.say(reply)
         return reply

@@ -80,13 +80,12 @@ class FakeTutor:
 
 
 def make_daemon(config, *, now=NOW, bridge=None, telegram=None, vault=None, tutor=None,
-                jobs=None, session=None, rng=None):
-    srs_path = config.srs_path
+                jobs=None, session=None, memory=None, srs=None, rng=None):
     from agent.state import SrsState
 
     return Daemon(
         replace(config, bridge_url=None),
-        srs=SrsState(srs_path),
+        srs=srs or SrsState(config.srs_path),
         session=session or SessionState.load(config.session_path),
         telegram=telegram or FakeTelegram(),
         chat_id="111",
@@ -94,6 +93,7 @@ def make_daemon(config, *, now=NOW, bridge=None, telegram=None, vault=None, tuto
         vault=vault,
         tutor=tutor or FakeTutor(),
         jobs=jobs or dict(DEFAULT_JOBS),
+        memory=memory,
         rng=rng,
         now_fn=lambda: now,
     )
@@ -320,6 +320,109 @@ def test_llm_failure_keeps_the_bot_alive(config):
     daemon = make_daemon(config, tutor=ExplodingTutor())
     daemon.handle_update({"update_id": 1, "message": {"text": "Hallo", "chat": {"id": "111"}}})
     assert "Netzwerk weg" in daemon.telegram.sent[0][1]
+
+
+# ---- v0.5: Morgen-Brief (08:00 nudge) -------------------------------------------------
+
+
+def test_nudge_sends_the_morgen_brief_with_phrases(config, vault):
+    from agent.phrases import PHRASE_BANK
+
+    events = [
+        {"title": "Anmeldung Bürgeramt", "start": "2026-10-02T16:00", "end": "2026-10-02T16:30", "all_day": False}
+    ]
+    daemon = make_daemon(config, now=NOW, bridge=FakeBridge(events=events), vault=vault)
+    daemon.job_nudge(NOW)
+
+    text = daemon.telegram.sent[0][1]
+    assert "Guten Morgen" in text and "Behörden und Termine" in text
+    assert "Deine Phrasen für heute:" in text
+    assert "1. " in text
+    phrases = [line.split(". ", 1)[1] for line in text.splitlines() if line[:2].strip(".").isdigit()]
+    assert 5 <= len(phrases) <= 8  # SPEC §4.6: 5–8 phrases
+    assert any(p in PHRASE_BANK["Behörden und Termine"] for p in phrases)  # event-tailored
+    # the plan is stored so /tag re-shows exactly this all day
+    plan = daemon.session.day_plan
+    assert plan["date"] == "2026-10-02" and plan["source"] == "calendar"
+    assert plan["phrases"] == phrases
+    # the daily note carries the same brief
+    daily = vault.read("Daily notes/2026-10-02-deutsch.md")
+    assert "Morgen-Brief" in daily and "Behörden und Termine" in daily
+
+
+def test_nudge_admits_when_the_calendar_was_unreadable(config):
+    daemon = make_daemon(config, now=NOW, bridge=FakeBridge(fail=True))
+    daemon.job_nudge(NOW)
+    text = daemon.telegram.sent[0][1]
+    assert "Kein Kalender gelesen" in text  # honest fallback (SPEC §4.6)
+    assert daemon.session.day_plan["source"] == "fallback"
+
+
+def test_nudge_lets_memory_interests_pick_the_flavor(config):
+    from agent.memory import MemoryState
+
+    from agent.phrases import PHRASE_BANK
+
+    memory = MemoryState.load(config.memory_path)
+    memory.record_interest("Bäckerei", landed=True)
+    daemon = make_daemon(config, now=NOW, bridge=FakeBridge(events=[]), memory=memory)
+    daemon.job_nudge(NOW)
+    text = daemon.telegram.sent[0][1]
+    assert any(phrase in text for phrase in PHRASE_BANK["Beim Bäcker"])  # flavor came from memory
+
+
+def test_phone_report_records_success_and_reinforces_srs(config, vault):
+    """20:00 Erfolgs-Check answered on the phone in plain text — the day-plan
+    phrase lands in memory.md, SRS and Deutsch/progress.md."""
+    from agent.memory import MemoryState
+    from agent.quiz import ensure_seeded
+    from agent.state import SrsState
+
+    daemon_srs = SrsState(config.srs_path)
+    ensure_seeded(daemon_srs)
+    memory = MemoryState.load(config.memory_path)
+    daemon = make_daemon(
+        config, now=NOW, bridge=FakeBridge(), vault=vault, memory=memory, srs=daemon_srs
+    )
+    daemon.session.day_plan = {
+        "date": NOW.date().isoformat(),
+        "topic": "Beim Bäcker",
+        "phrases": ["Ich hätte gern zwei Brötchen, bitte.", "Was kostet das Brot?"],
+        "source": "calendar",
+    }
+    daemon.session.current_topic = "Beim Bäcker"
+    daemon.respond("Guten Abend! Ich hätte gern zwei Brötchen bitte habe ich heute benutzt.")
+
+    reloaded = MemoryState.load(config.memory_path)
+    assert reloaded.erfolge and "Brötchen" in reloaded.erfolge[0].phrase
+    assert reloaded.erfolge[0].context == "Beim Bäcker"
+    assert daemon_srs.vocab["das Brötchen"].level == 2  # reinforced
+    progress = vault.read("Deutsch/progress.md")
+    assert "Erfolg" in progress
+
+
+# ---- v0.5: Abend-Recap Erfolgs-Check ---------------------------------------------------
+
+
+def test_recap_asks_which_phrases_were_used(config, vault):
+    daemon = make_daemon(config, now=datetime(2026, 10, 2, 20, 0), bridge=FakeBridge(), vault=vault)
+    daemon.session.day_plan = {
+        "date": "2026-10-02",
+        "topic": "Beim Bäcker",
+        "phrases": ["a", "b", "c", "d", "e"],
+        "source": "calendar",
+    }
+    daemon.job_recap(daemon._now())
+    text = daemon.telegram.sent[0][1]
+    assert "Tages-Recap gespeichert" in text
+    assert "Abend-Check" in text and "/erfolge" in text
+    assert "5 heutigen Phrasen" in text
+
+
+def test_recap_without_plan_still_asks(config):
+    daemon = make_daemon(config, now=datetime(2026, 10, 2, 20, 0), bridge=FakeBridge())
+    daemon.job_recap(daemon._now())
+    assert "Abend-Check" in daemon.telegram.sent[0][1]
 
 
 # ---- poll / sync / run loop ---------------------------------------------------------------------

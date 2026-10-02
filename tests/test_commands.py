@@ -1,6 +1,13 @@
 """German slash commands — stable names, state-only behavior."""
 
-from agent.commands import ChatContext, Direct, ToLLM, dispatch, COMMANDS
+from agent.commands import (
+    ChatContext,
+    Direct,
+    ToLLM,
+    dispatch,
+    note_user_exchange,
+    COMMANDS,
+)
 from agent.tracker import Tracker
 
 
@@ -167,3 +174,116 @@ def test_ueben_without_bridge_still_sets_topic(srs, session):
     assert isinstance(out, ToLLM)
     assert "Buchung" not in out.system_note
     assert session.current_topic == "Bäckerei"
+
+
+# ---- v0.5: /tag — today's tailored phrase plan ---------------------------------
+
+
+def test_tag_lazily_builds_and_stores_the_plan(srs, session, tmp_path):
+    from agent.memory import MemoryState
+
+    ctx = make_ctx(srs, session)
+    ctx.memory = MemoryState.load(tmp_path / "memory.md")
+    out = dispatch("/tag", ctx)
+    assert isinstance(out, Direct)
+    assert "📋 Dein Tag" in out.text and "1. " in out.text
+    assert 5 <= len(ctx.session.day_plan["phrases"]) <= 8  # stored for the whole day
+    assert dispatch("/tag", ctx).text == out.text  # same plan re-shown, not rebuilt
+
+
+def test_tag_re_shows_the_morning_plan_unchanged(srs, session, tmp_path):
+    from agent.memory import MemoryState
+
+    ctx = make_ctx(srs, session)
+    ctx.memory = MemoryState.load(tmp_path / "memory.md")
+    ctx.session.day_plan = {
+        "date": session_day(),
+        "topic": "Behörden und Termine",
+        "phrases": ["Ich habe einen Termin beim Bürgeramt.", "Und noch einer."],
+        "source": "calendar",
+    }
+    out = dispatch("/tag", ctx)
+    assert "Ich habe einen Termin beim Bürgeramt." in out.text
+    assert "aus deinem Kalender" in out.text  # the source is named honestly
+
+
+def session_day():
+    from datetime import date
+
+    return date.today().isoformat()
+
+
+# ---- v0.5: /erfolge — report a phrase you used ---------------------------------
+
+
+def test_erfolge_empty_prompts_for_a_report(srs, session):
+    out = dispatch("/erfolge", make_ctx(srs, session))
+    assert isinstance(out, Direct)
+    assert "/erfolge <Satz>" in out.text
+
+
+def test_erfolge_with_arg_routes_to_llm_and_marks_success(srs, session):
+    out = dispatch("/erfolge Ich habe einen Termin beim Bürgeramt.", make_ctx(srs, session))
+    assert isinstance(out, ToLLM)
+    assert "Ich habe einen Termin beim Bürgeramt." in out.user_message
+    assert "Richtig: … / Deine Version: …" in out.system_note
+    assert out.success_phrases == ("Ich habe einen Termin beim Bürgeramt.",)
+
+
+def test_erfolge_reports_land_in_memory_srs_and_progress(srs, session, vault, tmp_path):
+    from agent.memory import MemoryState
+    from agent.quiz import ensure_seeded
+
+    ensure_seeded(srs)
+    ctx = make_ctx(srs, session)
+    ctx.tracker = Tracker(vault=vault, srs=srs)
+    ctx.memory = MemoryState.load(tmp_path / "memory.md")
+    ctx.session.current_topic = "Beim Bäcker"
+    srs.vocab["das Brötchen"].level = 1
+    outcome = dispatch("/erfolge Ich hätte gern zwei Brötchen, bitte.", ctx)
+    note_user_exchange(ctx, outcome.user_message, "Sehr gut!", outcome.success_phrases)
+
+    # SRS reinforcement: exactly the seed word the phrase contains
+    assert srs.vocab["das Brötchen"].level == 2
+    assert srs.vocab["das Brot"].level == 1  # Brötchen ≠ Brot — untouched
+    # memory journal, persisted
+    reloaded = MemoryState.load(tmp_path / "memory.md")
+    assert [s.phrase for s in reloaded.erfolge] == ["Ich hätte gern zwei Brötchen, bitte."]
+    assert reloaded.erfolge[0].context == "Beim Bäcker"
+    assert [i.topic for i in reloaded.interessen] == ["Beim Bäcker"]
+    # append-only vault mirror
+    progress = vault.read("Deutsch/progress.md")
+    assert "Erfolg" in progress and "Brötchen" in progress
+
+
+def test_note_user_exchange_records_day_plan_phrases_from_conversation(srs, session, vault, tmp_path):
+    """The 20:00 Erfolgs-Check answered in plain text: a day-plan phrase
+    mentioned in the reply is recorded — no slash command needed."""
+    from agent.memory import MemoryState
+    from agent.quiz import ensure_seeded
+
+    ensure_seeded(srs)
+    ctx = make_ctx(srs, session)
+    ctx.tracker = Tracker(vault=vault, srs=srs)
+    ctx.memory = MemoryState.load(tmp_path / "memory.md")
+    ctx.session.day_plan = {
+        "date": session_day(),
+        "topic": "Beim Bäcker",
+        "phrases": ["Ich hätte gern zwei Brötchen, bitte.", "Was kostet das Brot?"],
+        "source": "calendar",
+    }
+    note_user_exchange(
+        ctx,
+        "Heute war ich beim Bäcker! Ich hätte gern zwei Brötchen bitte hat super funktioniert.",
+        "Sehr gut! Richtig: Ich hätte gern zwei Brötchen, bitte. / Deine Version: zwei Brötchen bitte",
+        (),
+    )
+    recorded = [s.phrase for s in ctx.memory.erfolge]
+    assert "Ich hätte gern zwei Brötchen, bitte." in recorded
+    assert "Was kostet das Brot?" not in recorded  # not mentioned → not recorded
+    assert [i.topic for i in ctx.memory.interessen] == ["Beim Bäcker"]  # context landed
+    # the correction in the reply is still logged as usual
+    assert srs.mistakes and "Richtig" not in srs.mistakes[0].example
+    # vault mirror
+    progress = vault.read("Deutsch/progress.md")
+    assert "Erfolg" in progress and "Brötchen" in progress

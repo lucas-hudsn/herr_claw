@@ -203,13 +203,15 @@ class SessionState:
 
     jobs_done records which daily-loop job last ran on which date
     ("nudge" → "2026-10-02") so the daemon never fires a job twice a day,
-    even across restarts."""
+    even across restarts. day_plan keeps the Morgen-Brief (v0.5) so /tag
+    re-shows exactly what the morning push sent (agent/phrases.DayPlan)."""
 
     last_session_end: str = ""
     last_session_turns: int = 0
     current_topic: str = ""
     pause_until: date | None = None
     jobs_done: dict[str, str] = field(default_factory=dict)
+    day_plan: dict = field(default_factory=dict)  # DayPlan.to_json() — plain dict on the wire
     path: Path = field(default_factory=lambda: Path("state") / "session.json")
 
     def save(self) -> None:
@@ -221,6 +223,7 @@ class SessionState:
             "current_topic": self.current_topic,
             "pause_until": self.pause_until.isoformat() if self.pause_until else None,
             "jobs_done": dict(self.jobs_done),
+            "day_plan": dict(self.day_plan),
         }
         tmp = self.path.with_suffix(".json.tmp")
         tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -240,6 +243,8 @@ class SessionState:
             state.jobs_done = {
                 str(name): str(day) for name, day in (raw.get("jobs_done") or {}).items()
             }
+            day_plan = raw.get("day_plan")
+            state.day_plan = dict(day_plan) if isinstance(day_plan, dict) else {}
         except (json.JSONDecodeError, TypeError, ValueError):
             pass
         return state

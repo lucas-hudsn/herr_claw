@@ -10,13 +10,19 @@ long-poll (quiz answers, slash commands) plus manual/break-glass use —
 
 Jobs at a glance (times from agent/schedule.yaml, Berlin wall clock):
 
-- 08:00 Morning Nudge — today's calendar suggests the topic, a free 15-min
-  slot is booked (Reminder in 'Deutsch' + event in 'Deutsch Lernen' via the
-  MCP bridge), and the nudge lands on the phone via Telegram.
+- 08:00 Morgen-Brief — today's calendar suggests the topic and hands the
+  learner 5–8 German phrases tailored to the real day (event themes, due
+  SRS vocab, memory interests — agent/phrases.py); a free 15-min slot is
+  booked (Reminder in 'Deutsch' + event in 'Deutsch Lernen' via the MCP
+  bridge); the brief lands on Telegram and in the daily note. /tag
+  re-shows it all day (session.json `day_plan`).
 - 12:30 Micro-quiz — 3 questions from the weakest vocab, but only if the
   nudge ran today (SPEC §4.1). Answered interactively on Telegram.
-- 20:00 Recap — appends the daily note + Deutsch/progress.md to Obsidian
-  and marks the day's practice reminders complete.
+- 20:00 Abend-Recap — appends the daily note + Deutsch/progress.md to
+  Obsidian, marks the day's practice reminders complete, and asks which
+  phrases you actually used (Erfolgs-Check). Reported phrases land in
+  state/memory.md, reinforce the matching SRS entries and are appended to
+  progress.md — in every frontend, via agent/commands.note_user_exchange.
 
 Job dedup lives in session.json (`jobs_done`: job → ISO date) — cron fires
 and a restarted daemon can never fire the same job twice on one day.
@@ -34,11 +40,18 @@ from datetime import date, datetime, time, timedelta
 from pathlib import Path
 
 from .bridge import BridgeClient, BridgeError
-from .chat import load_soul
-from .commands import ChatContext, Direct, ToLLM, dispatch
+from .chat import system_prompt_with_memory
+from .commands import ChatContext, Direct, ToLLM, dispatch, note_user_exchange
 from .config import Config, load_config
-from .llm import LLMError, Tutor, make_client, parse_correction
-from .quiz import ensure_seeded, load_seed, start as start_quiz, weakest_words
+from .llm import LLMError, Tutor, make_client
+from .memory import MemoryState
+from .phrases import (
+    build_day_plan,
+    fallback_topic,
+    render_brief,
+    render_plan_lines,
+)
+from .quiz import ensure_seeded, start as start_quiz
 from .scheduling import book_topic_session, fetch_today_events, suggest_topic
 from .state import SessionState, SrsState
 from .telegram import TelegramClient, TelegramError, parse_update
@@ -54,7 +67,6 @@ SCHEDULE_PATH = Path(__file__).resolve().parent / "schedule.yaml"
 DEFAULT_JOBS = {"nudge": time(8, 0), "quiz": time(12, 30), "recap": time(20, 0)}
 POLL_CAP_S = 50  # long-poll ceiling; jobs are minute-precision, this is plenty
 RETRY_BACKOFF_S = 10  # wait after a failed Telegram poll / failed job
-DEFAULT_TOPIC = "Smalltalk und Alltag"
 TELEGRAM_MAX_TOKENS = 300  # phone replies stay short, like the voice mode
 
 DAEMON_BANNER = (
@@ -112,6 +124,7 @@ class Daemon:
         vault=None,  # herrclaw_bridge.vault.Vault | None
         tutor: Tutor | None = None,
         jobs: dict[str, time] | None = None,
+        memory: MemoryState | None = None,
         rng: random.Random | None = None,
         now_fn=None,
         output_fn=print,
@@ -119,6 +132,7 @@ class Daemon:
         self.cfg = cfg
         self.srs = srs or SrsState(cfg.srs_path)
         self.session = session or SessionState.load(cfg.session_path)
+        self.memory = memory or MemoryState.load(cfg.memory_path)
         self.telegram = telegram
         self.chat_id = chat_id
         self.bridge = bridge
@@ -129,7 +143,14 @@ class Daemon:
         self._now = now_fn or datetime.now
         self.output = output_fn
         self.tracker = Tracker(vault=vault, srs=self.srs)
-        self.ctx = ChatContext(srs=self.srs, session=self.session, tracker=self.tracker, bridge=bridge)
+        self.ctx = ChatContext(
+            srs=self.srs,
+            session=self.session,
+            tracker=self.tracker,
+            bridge=bridge,
+            memory=self.memory,
+            rng=self.rng,
+        )
         self.history: list[dict[str, str]] = []
 
     # -- schedule helpers --------------------------------------------------
@@ -196,16 +217,6 @@ class Daemon:
         except TelegramError as exc:
             self.output(f"⚠︎ Telegram-Sendung fehlgeschlagen: {exc}")
 
-    def _fallback_topic(self) -> str | None:
-        """Theme of the weakest vocab — ties the SRS to the daily topic.
-        None when there is nothing to learn from (never invents a calendar
-        connection; the calendar-derived topic comes from suggest_topic)."""
-        weakest = weakest_words(self.srs, 1)
-        if not weakest:
-            return None
-        meta = load_seed().get(weakest[0], {})
-        return meta.get("theme") or None
-
     def job_nudge(self, now: datetime) -> None:
         events: list[dict] = []
         calendar_ok = True
@@ -214,7 +225,17 @@ class Daemon:
                 events = fetch_today_events(self.bridge, now)
             except BridgeError:
                 calendar_ok = False  # degrade honestly — the nudge still goes out
-        topic = suggest_topic(events, now) or self._fallback_topic() or DEFAULT_TOPIC
+        topic = suggest_topic(events, now) or fallback_topic(self.srs)
+        plan = build_day_plan(
+            events=events,
+            now=now,
+            srs=self.srs,
+            memory=self.memory,
+            rng=self.rng,
+            topic=topic,
+        )
+        self.session.day_plan = plan.to_json()  # /tag re-shows this all day
+        self.session.save()
         if self.bridge is None:
             booking = "Keine Bridge konfiguriert — heute keine Buchung (siehe HERR_BRIDGE_URL)."
         else:
@@ -224,7 +245,19 @@ class Daemon:
             booking = book_topic_session(
                 self.bridge, topic, now, events=events if calendar_ok else None
             )
-        self._send(f"Guten Morgen! ☕ Bereit für 5 Minuten? Heute: „{topic}“.\n{booking}")
+        self._send(
+            render_brief(
+                plan,
+                booking=booking,
+                closing="Erzähl mir heute Abend, welche du benutzt hast! (/erfolge <Satz>)",
+            )
+        )
+        if self.vault is not None:
+            brief_note = (
+                f"\n## Morgen-Brief — {now.strftime('%H:%M')}\n"
+                f"- Thema: {plan.topic}\n\n{render_plan_lines(plan)}\n"
+            )
+            safe_append(self.vault, now.strftime(DAILY_NOTE_FMT), brief_note)
 
     def job_quiz(self, now: datetime) -> None:
         if self.session.jobs_done.get("nudge") != now.date().isoformat():
@@ -278,14 +311,25 @@ class Daemon:
             )
         else:
             self.output("⚠︎ HERR_VAULT nicht gesetzt — Recap nur in state/.")
+        plan = self.ctx.today_plan()
+        erfolgs_check = (
+            f"Abend-Check: Welche der {len(plan.phrases)} heutigen Phrasen hast du benutzt? "
+            if plan
+            else "Abend-Check: Welche Phrasen hast du heute benutzt? "
+        )
         self._send(
             f"📚 Tages-Recap gespeichert. Streak: {self.srs.streak.current} Tag(e). "
-            "Gute Nacht! 🌙"
+            f"{erfolgs_check}Schreib sie einfach — oder kurz: /erfolge <Satz>. Gute Nacht! 🌙"
         )
 
     # -- Telegram turns -----------------------------------------------------
 
-    def _tutor_exchange(self, user_message: str, system_note: str | None = None) -> str | None:
+    def _tutor_exchange(
+        self,
+        user_message: str,
+        system_note: str | None = None,
+        extra_successes: tuple[str, ...] = (),
+    ) -> str | None:
         self.history.append({"role": "user", "content": user_message})
         try:
             reply = self.tutor.reply(self.history[-12:], system_note=system_note)
@@ -293,13 +337,7 @@ class Daemon:
             self.history.pop()
             return f"⚠︎ {exc}"
         self.history.append({"role": "assistant", "content": reply})
-        self.tracker.note_exchange()
-        self.srs.add_message()
-        self.srs.touch_day()
-        correction = parse_correction(reply)
-        if correction:
-            fix, example = correction
-            self.tracker.log_correction(example=example, fix=fix)
+        note_user_exchange(self.ctx, user_message, reply, extra_successes)
         return reply
 
     def respond(self, text: str) -> str | None:
@@ -308,7 +346,11 @@ class Daemon:
         if isinstance(outcome, Direct):
             return outcome.text
         if isinstance(outcome, ToLLM):
-            return self._tutor_exchange(outcome.user_message, system_note=outcome.system_note)
+            return self._tutor_exchange(
+                outcome.user_message,
+                system_note=outcome.system_note,
+                extra_successes=outcome.success_phrases,
+            )
         return self._tutor_exchange(text)
 
     def handle_update(self, update: dict) -> None:
@@ -410,6 +452,7 @@ def run_daemon(
     srs = SrsState(cfg.srs_path)
     ensure_seeded(srs)
     session = SessionState.load(cfg.session_path)
+    memory = MemoryState.load(cfg.memory_path)
     if bridge is None and cfg.bridge_url:
         bridge = BridgeClient(cfg.bridge_url)
     if tutor is None:
@@ -417,7 +460,7 @@ def run_daemon(
             tutor = Tutor(
                 make_client(cfg.base_url),
                 model=cfg.model,
-                system_prompt=load_soul(),
+                system_prompt=system_prompt_with_memory(memory),
                 max_tokens=TELEGRAM_MAX_TOKENS,
             )
         except LLMError as exc:
@@ -432,6 +475,7 @@ def run_daemon(
         bridge=bridge,
         vault=vault,
         tutor=tutor,
+        memory=memory,
         output_fn=output_fn,
     )
     return daemon.run()
