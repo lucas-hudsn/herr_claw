@@ -50,6 +50,12 @@ class LLMError(RuntimeError):
 
 def make_client(base_url: str = DEFAULT_BASE_URL, timeout: float = DEFAULT_TIMEOUT_S) -> OpenAI:
     api_key = os.environ.get("NVIDIA_API_KEY", "").strip()
+    if not api_key and base_url != DEFAULT_BASE_URL:
+        # Gateway-routed inference (the sandbox's inference.local): the OpenShell
+        # gateway injects the real key at egress — the client only needs a
+        # non-empty placeholder. This sentinel is NOT a secret and never used
+        # against the real NVIDIA endpoint.
+        api_key = "openshell-gateway"
     if not api_key:
         raise LLMError(
             "NVIDIA_API_KEY ist nicht gesetzt — trage sie in .env ein (siehe .env.example)."

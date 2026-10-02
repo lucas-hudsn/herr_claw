@@ -232,6 +232,49 @@ class QuizSession:
             text += " Kein Problem — die Wörter kommen bald wieder."
         return text
 
+    def to_json(self) -> dict:
+        """Persist the running quiz (session.json) so a quiz started in one
+        process — the cron quiz fire, a TUI session — can be answered in
+        another (the Telegram poller, the next `turn`)."""
+        return {
+            "questions": [
+                {
+                    "key": q.key,
+                    "qtype": q.qtype,
+                    "prompt": q.prompt,
+                    "display": q.display,
+                    "accepted": list(q.accepted),
+                }
+                for q in self.questions
+            ],
+            "index": self.index,
+            "correct": self.correct,
+            "today": self.today.isoformat(),
+        }
+
+    @classmethod
+    def from_json(cls, srs: SrsState, data: dict) -> "QuizSession | None":
+        """Rebuild a persisted quiz; None when the payload is malformed."""
+        try:
+            questions = [
+                QuizQuestion(
+                    key=str(q["key"]),
+                    qtype=str(q["qtype"]),
+                    prompt=str(q["prompt"]),
+                    display=str(q["display"]),
+                    accepted=tuple(str(a) for a in q["accepted"]),
+                )
+                for q in data["questions"]
+            ]
+            if not questions:
+                return None
+            session = cls(srs, questions, today=date.fromisoformat(str(data["today"])))
+            session.index = int(data["index"])
+            session.correct = int(data["correct"])
+            return session
+        except (KeyError, TypeError, ValueError):
+            return None
+
 
 def start(
     srs: SrsState,

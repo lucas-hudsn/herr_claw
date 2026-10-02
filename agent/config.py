@@ -1,9 +1,10 @@
 """Runtime configuration. Variable names and defaults follow .env.example.
 
-ONE state path: everything persistent lives in <repo>/state/ on the HOST —
-the sandbox never sees it (P5: NemoClaw host mounts are read-only, so the
-OpenClaw-cron trigger path calls the bridge instead, and job bodies run
-host-side where this file is the single source of paths).
+ONE state path: everything persistent lives in the directory named by
+HERR_STATE_DIR — <repo>/state/ on the host, /sandbox/herrclaw/state inside
+the sandbox (P6: the agent's brain runs IN the sandbox, so its state lives
+there too; the host keeps no agent state). This file is the single source
+of paths on both sides.
 """
 
 from __future__ import annotations
@@ -22,6 +23,8 @@ DEFAULT_MODEL = "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning"
 DEFAULT_BASE_URL = "https://integrate.api.nvidia.com/v1"
 DEFAULT_WHISPER_MODEL = "base"  # never tiny — too weak for German (AGENTS.md)
 BRIDGE_OFF = {"off", "false", "0", "none"}
+CHAT_BACKEND_LOCAL = "local"  # HERR_CHAT_BACKEND — break-glass in-process brain
+SANDBOX_STATE_DIR = "/sandbox/herrclaw/state"
 
 
 @dataclass(frozen=True)
@@ -34,6 +37,7 @@ class Config:
     whisper_model: str = DEFAULT_WHISPER_MODEL
     mic_device: str = ""  # HERR_MIC_DEVICE override (name substring or index)
     telegram_chat_id: str = ""  # HERR_TELEGRAM_CHAT_ID — the ONE chat the bot answers
+    chat_backend: str = "sandbox"  # "sandbox" (default) | "local" (break-glass)
 
     @property
     def srs_path(self) -> Path:
@@ -51,6 +55,8 @@ class Config:
 def load_config() -> Config:
     vault = os.environ.get("HERR_VAULT", "").strip()
     bridge = os.environ.get("HERR_BRIDGE_URL", "").strip()
+    state_dir = os.environ.get("HERR_STATE_DIR", "").strip()
+    backend = os.environ.get("HERR_CHAT_BACKEND", "").strip().lower()
     return Config(
         model=os.environ.get("HERR_MODEL", "").strip() or DEFAULT_MODEL,
         base_url=os.environ.get("HERR_NVIDIA_BASE_URL", "").strip() or DEFAULT_BASE_URL,
@@ -60,4 +66,6 @@ def load_config() -> Config:
         whisper_model=os.environ.get("HERR_WHISPER_MODEL", "").strip() or DEFAULT_WHISPER_MODEL,
         mic_device=os.environ.get("HERR_MIC_DEVICE", "").strip(),
         telegram_chat_id=os.environ.get("HERR_TELEGRAM_CHAT_ID", "").strip(),
+        chat_backend=backend if backend in {"sandbox", CHAT_BACKEND_LOCAL} else "sandbox",
+        state_dir=Path(os.path.expanduser(state_dir)) if state_dir else DEFAULT_STATE_DIR,
     )

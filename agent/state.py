@@ -202,9 +202,18 @@ class SessionState:
     """session.json — light session/schedule state (ONE state path, second file).
 
     jobs_done records which daily-loop job last ran on which date
-    ("nudge" → "2026-10-02") so the daemon never fires a job twice a day,
-    even across restarts. day_plan keeps the Morgen-Brief (v0.5) so /tag
-    re-shows exactly what the morning push sent (agent/phrases.DayPlan)."""
+    ("nudge" → "2026-10-02") so a job can never fire twice a day —
+    across cron fires and manual triggers alike. day_plan keeps the
+    Morgen-Brief (v0.5) so /tag re-shows exactly what the morning push
+    sent (agent/phrases.DayPlan).
+
+    The P6 fields make the brain continuous across one-shot processes
+    (every TUI/voice/Telegram turn is its own `herr-claw turn` process):
+    history is the rolling LLM window, active_quiz a quiz someone started
+    in another process (cron quiz fire ↔ Telegram answers), last_activity
+    drives the 60-minute session-gap close, and session_turns/
+    session_corrections accumulate the open session's counts across
+    processes (agent/tracker reads and resets them at session end)."""
 
     last_session_end: str = ""
     last_session_turns: int = 0
@@ -212,18 +221,28 @@ class SessionState:
     pause_until: date | None = None
     jobs_done: dict[str, str] = field(default_factory=dict)
     day_plan: dict = field(default_factory=dict)  # DayPlan.to_json() — plain dict on the wire
+    history: list[dict] = field(default_factory=list)  # rolling LLM window
+    active_quiz: dict = field(default_factory=dict)  # QuizSession.to_json()
+    last_activity: str = ""  # ISO ts of the last turn — session-gap detection
+    session_turns: int = 0  # open session's turn count (resets at session end)
+    session_corrections: int = 0
     path: Path = field(default_factory=lambda: Path("state") / "session.json")
 
     def save(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         payload = {
-            "version": 1,
+            "version": 2,
             "last_session_end": self.last_session_end,
             "last_session_turns": self.last_session_turns,
             "current_topic": self.current_topic,
             "pause_until": self.pause_until.isoformat() if self.pause_until else None,
             "jobs_done": dict(self.jobs_done),
             "day_plan": dict(self.day_plan),
+            "history": list(self.history),
+            "active_quiz": dict(self.active_quiz),
+            "last_activity": self.last_activity,
+            "session_turns": self.session_turns,
+            "session_corrections": self.session_corrections,
         }
         tmp = self.path.with_suffix(".json.tmp")
         tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -245,6 +264,17 @@ class SessionState:
             }
             day_plan = raw.get("day_plan")
             state.day_plan = dict(day_plan) if isinstance(day_plan, dict) else {}
+            history = raw.get("history")
+            state.history = [
+                {"role": str(m.get("role", "")), "content": str(m.get("content", ""))}
+                for m in history
+                if isinstance(m, dict)
+            ] if isinstance(history, list) else []
+            quiz = raw.get("active_quiz")
+            state.active_quiz = dict(quiz) if isinstance(quiz, dict) else {}
+            state.last_activity = str(raw.get("last_activity", "") or "")
+            state.session_turns = int(raw.get("session_turns", 0))
+            state.session_corrections = int(raw.get("session_corrections", 0))
         except (json.JSONDecodeError, TypeError, ValueError):
             pass
         return state

@@ -1,21 +1,33 @@
 """The v0.5 chat TUI: moustache banner, `:-{)` agent turns, status line,
-scroll-region frame — and the off-TTY plain-loop fallback (SPEC §4.6)."""
+scroll-region frame — and the off-TTY plain-loop fallback (SPEC §4.6).
+P6: the loop is a thin client; a FakeBrain stands in for the sandbox."""
 
 import sys
 
-import pytest
-
-from agent.chat import MIN_TUI_ROWS, Tui, load_soul, run_chat, status_line, system_prompt_with_memory
+from agent.chat import MIN_TUI_ROWS, Tui, run_chat, status_line
 from agent.memory import MemoryState
+from agent.turns import TurnError, TurnResult, load_soul, system_prompt_with_memory
 
 
-class FakeTutor:
-    def __init__(self):
-        self.calls = []
+class FakeBrain:
+    def __init__(self, error: Exception | None = None):
+        self.texts: list[str] = []
+        self.error = error
+        self.closed = False
 
-    def reply(self, window, system_note=None):
-        self.calls.append({"window": list(window), "system_note": system_note})
-        return f"Antwort Nummer {len(self.calls)}. Wie geht es dir?"
+    def turn(self, text: str) -> TurnResult:
+        self.texts.append(text)
+        if self.error is not None:
+            raise self.error
+        return TurnResult(
+            reply=f"Antwort Nummer {len(self.texts)}. Wie geht es dir?",
+            streak=len(self.texts),
+            due=3,
+            topic="Beim Bäcker",
+        )
+
+    def close(self) -> None:
+        self.closed = True
 
 
 def make_io(responses):
@@ -74,26 +86,24 @@ def test_tui_rows_never_below_the_frame_minimum():
 
 
 def test_run_chat_renders_tui_when_tty(config):
-    fake = FakeTutor()
+    fake = FakeBrain()
     input_fn, output_fn, outputs = make_io(["Hallo!", "Noch was!"])
-    code = run_chat(cfg=config, tutor=fake, input_fn=input_fn, output_fn=output_fn, tty=True)
+    code = run_chat(cfg=config, brain=fake, input_fn=input_fn, output_fn=output_fn, tty=True)
     assert code == 0
     combined = "\n".join(outputs)
     assert "\\___/" in combined  # moustache banner drawn
     assert ":-{) Antwort Nummer 1." in combined  # agent turns marked
     assert "Herr Claw: " not in combined  # the plain prefix is gone in TUI mode
-    assert "Streak" in combined  # status strip visible
+    assert "Streak" in combined  # status strip visible (from the brain's result)
     assert "\x1b[r" in combined  # terminal restored on exit
-
-    from agent.state import SrsState
-
-    assert SrsState(config.srs_path).totals.messages == 2  # state still persists
+    assert fake.texts == ["Hallo!", "Noch was!"]
+    assert fake.closed  # the loop closes the brain (session end lives there)
 
 
 def test_run_chat_plain_loop_off_tty(config):
-    fake = FakeTutor()
+    fake = FakeBrain()
     input_fn, output_fn, outputs = make_io(["Hallo!"])
-    run_chat(cfg=config, tutor=fake, input_fn=input_fn, output_fn=output_fn, tty=False)
+    run_chat(cfg=config, brain=fake, input_fn=input_fn, output_fn=output_fn, tty=False)
     combined = "\n".join(outputs)
     assert "Herr Claw: Antwort Nummer 1." in combined
     assert "\\___/" not in combined  # no moustache frame off-TTY
@@ -111,26 +121,22 @@ def test_run_chat_falls_back_when_terminal_too_small(config, monkeypatch):
 
     monkeypatch.setattr(sys, "stdout", TinyStream())
     monkeypatch.setattr(sys, "stdin", TinyStream())
-    fake = FakeTutor()
+    fake = FakeBrain()
     input_fn, output_fn, outputs = make_io(["Hallo!"])
-    run_chat(cfg=config, tutor=fake, input_fn=input_fn, output_fn=output_fn)  # tty=None → probe
+    run_chat(cfg=config, brain=fake, input_fn=input_fn, output_fn=output_fn)  # tty=None → probe
     combined = "\n".join(outputs)
     assert "Herr Claw: Antwort Nummer 1." in combined  # degraded to the plain loop
 
 
-def test_run_chat_tui_llm_error_restores_terminal(config):
-    class ExplodingTutor:
-        def reply(self, window, system_note=None):
-            from agent.llm import LLMError
-
-            raise LLMError("Netzwerk weg")
-
+def test_run_chat_brain_error_warns_restores_terminal_and_closes(config):
+    fake = FakeBrain(error=TurnError("Sandbox nicht erreichbar"))
     input_fn, output_fn, outputs = make_io(["Hallo!"])
-    code = run_chat(cfg=config, tutor=ExplodingTutor(), input_fn=input_fn, output_fn=output_fn, tty=True)
+    code = run_chat(cfg=config, brain=fake, input_fn=input_fn, output_fn=output_fn, tty=True)
     assert code == 0
     combined = "\n".join(outputs)
-    assert "Netzwerk weg" in combined
-    assert combined.endswith("\x1b[r\x1b[24;1H") or "\x1b[r" in combined
+    assert "Sandbox nicht erreichbar" in combined  # the warning reached the user
+    assert fake.closed  # terminal + brain shut down cleanly
+    assert "\x1b[r" in combined
 
 
 # ---- memory in every content-generating prompt ------------------------------------

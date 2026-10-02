@@ -1,11 +1,12 @@
-"""`herr-claw sprechen` — the voice loop (P3, SPEC §4.2).
+"""`herr-claw sprechen` — the voice loop (P3, SPEC §4.2; P6 thin client).
 
 push-to-talk (Leertaste/⏎) → record (silence-stopped, ≤5 s) → STT
-(mlx-whisper base, de) → Nemotron reply (thinking off, sanitized) → print
-+ `say -v Anna`. Same ONE state path and tracking as `chat`: SrsState,
-SessionState, Tracker, and the stable slash commands via
-agent.commands.dispatch (command output is printed, never spoken). The
-round-trip latency is printed per turn so the <5 s budget is visible live.
+(mlx-whisper base, de) → the brain's reply → print + `say -v Anna`.
+STT and TTS stay host-side (macOS audio); the BRAIN is the same seam as
+the TUI's: sandbox brain by default, local break-glass fallback
+(agent.turns.AutoBrain). Command output arrives marked `speakable=False`
+and is printed, never spoken. The round-trip latency is printed per turn
+so the <5 s budget is visible live.
 """
 
 from __future__ import annotations
@@ -15,23 +16,10 @@ import sys
 import termios
 import time
 import tty
-from datetime import datetime
-
-from agent.bridge import BridgeClient
-from agent.chat import _topic_from_calendar, system_prompt_with_memory
-from agent.commands import ChatContext, Direct, ToLLM, dispatch, note_user_exchange
-from agent.config import Config, load_config
-from agent.llm import LLMError, Tutor, make_client
-from agent.memory import MemoryState
-from agent.quiz import ensure_seeded
-from agent.state import SessionState, SrsState
-from agent.tracker import Tracker
 
 from .stt import AudioError, Mic, Transcriber
 from .tts import Speaker
 
-MAX_HISTORY_MESSAGES = 12  # same window as chat
-VOICE_MAX_TOKENS = 300  # 3–4 short German sentences; caps runaway replies
 QUIT_WORDS = {"q", "quit", "exit", "beenden", "tschüss", "tschuess"}
 
 BANNER = (
@@ -118,41 +106,25 @@ class KeyPrompt:
 
 
 def run_sprechen(
-    cfg: Config | None = None,
+    cfg=None,
     *,
-    tutor: Tutor | None = None,
+    brain=None,
     transcribe=None,  # ndarray → str
     speaker: Speaker | None = None,
     record_audio=None,  # → ndarray (default: Mic)
     key_prompt: KeyPrompt | None = None,
     output_fn=print,
 ) -> int:
-    cfg = cfg or load_config()
-    srs = SrsState(cfg.srs_path)
-    ensure_seeded(srs)  # same seed import as chat — /quiz works in voice mode too
-    session = SessionState.load(cfg.session_path)
-    memory = MemoryState.load(cfg.memory_path)
-    vault = None
-    if cfg.vault_root:
-        from herrclaw_bridge.vault import Vault
+    from agent.llm import LLMError
+    from agent.turns import TurnError, make_brain
 
-        vault = Vault(cfg.vault_root)
-    else:
-        output_fn("⚠︎ HERR_VAULT ist nicht gesetzt — Obsidian-Notizen sind deaktiviert.")
-    if tutor is None:
+    cfg = cfg or load_config()
+    if brain is None:
         try:
-            tutor = Tutor(
-                make_client(cfg.base_url),
-                model=cfg.model,
-                system_prompt=system_prompt_with_memory(memory),
-                max_tokens=VOICE_MAX_TOKENS,
-            )
+            brain = make_brain(cfg, output_fn)
         except LLMError as exc:
             output_fn(f"⚠︎ {exc}")
             return 1
-    bridge = BridgeClient(cfg.bridge_url) if cfg.bridge_url else None
-    tracker = Tracker(vault=vault, srs=srs)
-    ctx = ChatContext(srs=srs, session=session, tracker=tracker, bridge=bridge, memory=memory)
 
     if transcribe is None:
         stt = Transcriber(cfg.whisper_model)
@@ -180,26 +152,22 @@ def run_sprechen(
             output_fn(f"⚠︎ {exc}")
 
     output_fn(BANNER)
-    startup_note = _topic_from_calendar(bridge, session, output_fn)
-    history: list[dict[str, str]] = []
 
-    def tutor_exchange(user_message: str, system_note: str | None = None, speak: bool = True) -> str | None:
-        nonlocal startup_note
-        if system_note is None and startup_note:
-            system_note, startup_note = startup_note, None
-        history.append({"role": "user", "content": user_message})
+    def speak_line(text: str) -> None:
+        output_fn(f"Herr Claw: {text}")
+        speaker.say(text)
+
+    def brain_exchange(text: str, speak: bool = True) -> str | None:
         try:
-            reply = tutor.reply(history[-MAX_HISTORY_MESSAGES:], system_note=system_note)
-        except LLMError as exc:
+            result = brain.turn(text)
+        except (TurnError, LLMError) as exc:
             output_fn(f"⚠︎ {exc}")
-            history.pop()  # keep the window clean; the user simply retries
             return None
-        history.append({"role": "assistant", "content": reply})
-        output_fn(f"Herr Claw: {reply}")
-        note_user_exchange(ctx, user_message, reply)
-        if speak:
-            speaker.say(reply)
-        return reply
+        if result.speakable and speak:
+            speak_line(result.reply)
+        else:
+            output_fn(f"Herr Claw: {result.reply}")  # command output stays on screen
+        return result.reply
 
     def voice_turn() -> None:
         if record_audio is None:
@@ -228,7 +196,7 @@ def run_sprechen(
             speaker.say("Das habe ich nicht verstanden. Nochmal, bitte!")
             return
         output_fn(f"Du 🗣️: {transcript}")
-        reply = tutor_exchange(transcript, speak=False)
+        reply = brain_exchange(transcript, speak=False)
         if reply is not None:
             # Anna's playback time is intentionally not counted — this is the
             # response latency the <5s budget (SPEC §4.2) is about.
@@ -236,33 +204,25 @@ def run_sprechen(
             speaker.say(reply)
 
     prompt = key_prompt or KeyPrompt()
-    while True:
-        try:
-            line = prompt.read(on_space=voice_turn)
-        except KeyboardInterrupt:  # Ctrl-C while `say`/LLM runs
-            output_fn("")
-            break
-        if line is None:
-            break
-        line = line.strip()
-        if not line:
-            continue
-        if line.lower() in QUIT_WORDS:
-            break
-        outcome = dispatch(line, ctx)
-        if isinstance(outcome, Direct):
-            output_fn(f"Herr Claw: {outcome.text}")  # command output stays on screen
-            continue
-        if isinstance(outcome, ToLLM):
-            tutor_exchange(outcome.user_message, system_note=outcome.system_note)
-        else:
-            tutor_exchange(line)
-
-    tracker.end_session(topic=session.current_topic)
-    session.last_session_turns = tracker.session_turns
-    session.last_session_end = datetime.now().isoformat(timespec="seconds")
-    srs.save()
-    session.save()
-    if tracker.session_turns:
+    turns = 0
+    try:
+        while True:
+            try:
+                line = prompt.read(on_space=voice_turn)
+            except KeyboardInterrupt:  # Ctrl-C while `say`/LLM runs
+                output_fn("")
+                break
+            if line is None:
+                break
+            line = line.strip()
+            if not line:
+                continue
+            if line.lower() in QUIT_WORDS:
+                break
+            if brain_exchange(line) is not None:
+                turns += 1
+    finally:
+        brain.close()
+    if turns:
         output_fn("Tschüss! Bis zum nächsten Mal. 👋")
     return 0

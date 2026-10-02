@@ -1,4 +1,4 @@
-"""`herr-claw chat` — the text frontend (P1 loop, v0.5 real TUI).
+"""`herr-claw chat` — the text frontend (P1 loop, v0.5 real TUI, P6 thin client).
 
 On a TTY the loop runs as a small terminal UI: a fixed moustache-mascot
 banner on top, the transcript scrolling between banner and a fixed status
@@ -6,10 +6,10 @@ line (terminal scroll region), agent turns marked with the moustache glyph
 `:-{)` (SPEC §4.6 — the moustache is the product's face in every frontend).
 Off-TTY (pipes, tests) it degrades to the plain read–reply loop.
 
-Read–reply against Nemotron 3 with SOUL.md + the memory journal
-(state/memory.md) as system prompt, rolling history, correction extraction,
-and persistence: state/ always, Obsidian (via the bridge's scoped vault)
-when HERR_VAULT is set.
+Since P6 the loop holds NO brain and NO state: every user line goes through
+agent.turns (sandbox brain via `nemoclaw exec` by default, local brain as
+break-glass fallback) — rendering is all that happens here. The moustache
+is the product's face in every frontend.
 """
 
 from __future__ import annotations
@@ -17,26 +17,9 @@ from __future__ import annotations
 import sys
 from datetime import datetime
 
-from .bridge import BridgeClient, BridgeError
-from .commands import ChatContext, Direct, ToLLM, dispatch, note_user_exchange
-from .config import Config, SOUL_PATH, load_config
-from .llm import LLMError, Tutor, make_client
-from .memory import MemoryState
-from .quiz import ensure_seeded
-from .scheduling import fetch_today_events, suggest_topic
-from .state import SessionState, SrsState
-from .tracker import Tracker
+from .turns import TurnResult, make_brain
 
-MAX_HISTORY_MESSAGES = 12
 MIN_TUI_ROWS = 14  # below this the moustache frame would not fit — plain loop
-
-_FALLBACK_SOUL = (
-    "Du bist Herr Claw, ein geduldiger Deutsch-Tutor für Lucas (A1-A2, Berlin). "
-    "Antworte nur auf Deutsch in kurzen, einfachen Sätzen (max. 3-4), ohne Markdown, "
-    "denn die Antworten werden laut vorgelesen. Nomen immer mit Artikel und Plural. "
-    "Korrigiere Fehler sanft in einer Zeile: 'Richtig: … / Deine Version: …'. "
-    "Erkläre auf Englisch nur, wenn Lucas darum bittet."
-)
 
 BANNER = """\
 Herr Claw 🤖 — dein Deutsch-Tutor (A1–A2)
@@ -61,30 +44,18 @@ TUI_COMMANDS = (
 )
 
 
-def load_soul(path=SOUL_PATH) -> str:
-    try:
-        soul = path.read_text(encoding="utf-8").strip()
-        if soul:
-            return soul
-    except OSError:
-        pass
-    return _FALLBACK_SOUL
-
-
-def system_prompt_with_memory(memory: MemoryState | None) -> str:
-    """SOUL + the memory journal — every content-generating prompt starts
-    from this (SPEC §4.6); the memory tailors phrasing/topics only."""
-    base = load_soul()
-    if memory is None:
-        return base
-    block = memory.prompt_block()
-    return f"{base}\n\n{block}" if block else base
-
-
-def status_line(srs: SrsState, session: SessionState) -> str:
-    """The one-line status strip: streak, due cards, current topic."""
+def status_line(srs, session) -> str:
+    """The one-line status strip (local-state variant, kept for the plain
+    brain path and tests): streak, due cards, current topic."""
     topic = session.current_topic or "—"
     return f" Streak {srs.streak.current} · {len(srs.due())} fällig · Thema: {topic} "
+
+
+def status_text(result: TurnResult) -> str:
+    """The status strip from a brain result — the thin client's variant
+    (the host has no state of its own)."""
+    topic = result.topic or "—"
+    return f" Streak {result.streak} · {result.due} fällig · Thema: {topic} "
 
 
 class Tui:
@@ -153,31 +124,19 @@ def _make_tui(output_fn, tty: bool | None) -> Tui | None:
 
 
 def run_chat(
-    cfg: Config | None = None,
-    tutor: Tutor | None = None,
+    cfg=None,
+    brain=None,
     input_fn=input,
     output_fn=print,
     tty: bool | None = None,
 ) -> int:
-    cfg = cfg or load_config()
-    srs = SrsState(cfg.srs_path)
-    ensure_seeded(srs)  # seed list present on first run → /quiz works instantly
-    session = SessionState.load(cfg.session_path)
-    memory = MemoryState.load(cfg.memory_path)
-    vault = None
-    if cfg.vault_root:
-        from herrclaw_bridge.vault import Vault
+    """The P1 read–reply loop, now over the brain seam: each user line is
+    one brain turn (sandbox by default); this process only renders. The
+    brain owns history, state and the session — nothing is saved here."""
+    from .llm import LLMError
+    from .turns import TurnError
 
-        vault = Vault(cfg.vault_root)
-    else:
-        output_fn("⚠︎ HERR_VAULT ist nicht gesetzt — Obsidian-Notizen sind deaktiviert.")
-    if tutor is None:
-        tutor = Tutor(make_client(cfg.base_url), model=cfg.model, system_prompt=system_prompt_with_memory(memory))
-    bridge = BridgeClient(cfg.bridge_url) if cfg.bridge_url else None
-    tracker = Tracker(vault=vault, srs=srs)
-    ctx = ChatContext(srs=srs, session=session, tracker=tracker, bridge=bridge, memory=memory)
-
-    startup_note = _topic_from_calendar(bridge, session, output_fn)
+    brain = brain or make_brain(cfg, output_fn)
     tui = _make_tui(output_fn, tty)
 
     def agent_says(text: str) -> None:
@@ -186,13 +145,19 @@ def run_chat(
         else:
             tui.agent_turn(text)
 
+    def note(text: str) -> None:
+        if tui is None:
+            output_fn(text)
+        else:
+            tui.note(text)
+
     if tui is None:
         output_fn(BANNER)
     else:
         tui.start()
-        tui.set_status(status_line(srs, session))
+        tui.set_status(" Bereit ")
 
-    history: list[dict[str, str]] = []
+    turns = 0
     try:
         while True:
             try:
@@ -204,63 +169,19 @@ def run_chat(
             raw = raw.strip()
             if not raw:
                 continue
-
-            outcome = dispatch(raw, ctx)
-            if isinstance(outcome, Direct):
-                agent_says(outcome.text)
-                if tui is not None:
-                    tui.set_status(status_line(srs, session))
-                continue
-            if isinstance(outcome, ToLLM):
-                user_message, system_note = outcome.user_message, outcome.system_note
-            else:
-                user_message, system_note = raw, None
-            if system_note is None and startup_note:
-                system_note, startup_note = startup_note, None
-
-            history.append({"role": "user", "content": user_message})
             try:
-                reply = tutor.reply(history[-MAX_HISTORY_MESSAGES:], system_note=system_note)
-            except LLMError as exc:
-                if tui is None:
-                    output_fn(f"⚠︎ {exc}")
-                else:
-                    tui.note(f"⚠︎ {exc}")
+                result = brain.turn(raw)
+            except (TurnError, LLMError) as exc:
+                note(f"⚠︎ {exc}")
                 break
-            history.append({"role": "assistant", "content": reply})
-            note_user_exchange(ctx, user_message, reply)
-            agent_says(reply)
+            turns += 1
+            agent_says(result.reply)
             if tui is not None:
-                tui.set_status(status_line(srs, session))
+                tui.set_status(status_text(result))
     finally:
-        tracker.end_session(topic=session.current_topic)
-        session.last_session_turns = tracker.session_turns
-        session.last_session_end = datetime.now().isoformat(timespec="seconds")
-        srs.save()
-        session.save()
+        brain.close()
         if tui is not None:
             tui.stop()
-    if tracker.session_turns:
+    if turns:
         output_fn("Tschüss! Bis zum nächsten Mal. 👋")
     return 0
-
-
-def _topic_from_calendar(bridge: BridgeClient | None, session: SessionState, output_fn=print) -> str | None:
-    """P2 flourish: when no topic is set and the bridge is up, today's
-    calendar suggests the practice topic. Silent degradation — the TUI must
-    start instantly and identically when the bridge is down."""
-    if bridge is None or session.current_topic:
-        return None
-    try:
-        events = fetch_today_events(bridge)
-    except BridgeError:
-        return None
-    topic = suggest_topic(events, now=datetime.now())
-    if not topic:
-        return None
-    session.current_topic = topic
-    output_fn(f"📅 Aus deinem Kalender: heute üben wir „{topic}“.")
-    return (
-        f"Lucas startet eine neue Session. Aus seinem Kalender heute ergibt sich das "
-        f"Thema „{topic}“ — beginne damit: EIN kurzer Satz zum Thema + EINE einfache Frage an Lucas (A1-A2)."
-    )

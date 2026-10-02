@@ -1,4 +1,5 @@
-"""CLI surface (Typer app): herr-claw chat / sprechen / bridge / --help."""
+"""CLI surface (Typer app): herr-claw chat / sprechen / bridge / turn /
+trigger / telegram-loop / telegram-watchdog / install-cron / --help."""
 
 from typer.testing import CliRunner
 
@@ -12,6 +13,9 @@ def test_help_lists_subcommands():
     assert result.exit_code == 0
     assert "chat" in result.output
     assert "sprechen" in result.output
+    assert "turn" in result.output  # P6: the brain surface
+    assert "telegram-loop" in result.output  # P6: the in-sandbox receiver
+    assert "install-cron" in result.output
 
 
 def test_bare_invocation_prints_help_and_exits_zero():
@@ -63,24 +67,88 @@ def test_chat_dispatches_to_run_chat(monkeypatch):
     assert called["ran"] is True
 
 
-def test_daemon_dispatches_to_run_daemon(monkeypatch):
+def test_trigger_dispatches_to_trigger_job(monkeypatch):
     called = {}
 
-    def fake_run_daemon():
+    def fake_trigger_job(job):
+        called["job"] = job
+        return 0
+
+    monkeypatch.setattr("agent.cron_sync.trigger_job", fake_trigger_job)
+    result = runner.invoke(main.app, ["trigger", "quiz"])
+    assert result.exit_code == 0
+    assert called["job"] == "quiz"
+
+
+def test_install_cron_dispatches_to_cron_sync(monkeypatch):
+    called = {}
+
+    def fake_install_cron():
         called["ran"] = True
         return 0
 
-    monkeypatch.setattr("agent.daemon.run_daemon", fake_run_daemon)
-    result = runner.invoke(main.app, ["daemon"])
+    monkeypatch.setattr("agent.cron_sync.install_cron", fake_install_cron)
+    result = runner.invoke(main.app, ["install-cron"])
     assert result.exit_code == 0
     assert called["ran"] is True
 
 
-def test_daemon_help_mentions_scheduler_and_break_glass():
-    result = runner.invoke(main.app, ["daemon", "--help"])
+def test_trigger_help_mentions_the_openclaw_cron():
+    result = runner.invoke(main.app, ["trigger", "--help"])
     assert result.exit_code == 0
     assert "OpenClaw-cron" in result.output  # the ONE scheduler (P5)
-    assert "Break-Glass" in result.output  # the host loop's remaining role
+    assert "nudge" in result.output  # the fixed job names are visible
+
+
+def test_turn_dispatches_to_run_turn_cli(monkeypatch):
+    called = {}
+
+    def fake_run_turn_cli(message, json_out=False, **_kwargs):
+        called["message"] = message
+        called["json_out"] = json_out
+        return 0
+
+    monkeypatch.setattr("agent.turns.run_turn_cli", fake_run_turn_cli)
+    result = runner.invoke(main.app, ["turn", "Hallo!", "--json"])
+    assert result.exit_code == 0
+    assert called["message"] == "Hallo!" and called["json_out"] is True
+
+
+def test_turn_help_mentions_the_brain():
+    result = runner.invoke(main.app, ["turn", "--help"])
+    assert result.exit_code == 0
+    assert "Gehirn" in result.output  # P6: the brain surface
+
+
+def test_telegram_loop_dispatches_to_poller(monkeypatch):
+    called = {}
+
+    def fake_run_poller(**_kwargs):
+        called["ran"] = True
+        return 0
+
+    monkeypatch.setattr("agent.poller.run_poller", fake_run_poller)
+    result = runner.invoke(main.app, ["telegram-loop"])
+    assert result.exit_code == 0
+    assert called["ran"] is True
+
+
+def test_telegram_watchdog_dispatches_to_poller(monkeypatch):
+    called = {}
+
+    def fake_run_watchdog(**_kwargs):
+        called["ran"] = True
+        return 0
+
+    monkeypatch.setattr("agent.poller.run_watchdog", fake_run_watchdog)
+    result = runner.invoke(main.app, ["telegram-watchdog"])
+    assert result.exit_code == 0
+    assert called["ran"] is True
+
+
+def test_daemon_subcommand_stays_gone():
+    result = runner.invoke(main.app, ["daemon", "--help"])
+    assert result.exit_code != 0  # removed in P5/P6 — must not come back
 
 
 def test_cli_wrapper_returns_exit_code_int():

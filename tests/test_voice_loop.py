@@ -1,12 +1,11 @@
-"""voice.loop — the sprechen loop with fakes for mic/STT/TTS/TUI, plus the
-KeyPrompt line editor. Everything stateful goes through the tmp-path config,
-never the real state/ or vault."""
+"""voice.loop — the sprechen loop with fakes for mic/STT/TTS, plus the
+KeyPrompt line editor. P6: the loop is a thin client — the brain seam is
+faked (FakeBrain), so nothing here touches state, the LLM, or the network."""
 
 import numpy as np
 import pytest
 
-from agent.llm import LLMError
-from agent.state import SrsState
+from agent.turns import TurnError, TurnResult
 from voice.loop import KeyPrompt, run_sprechen
 
 
@@ -18,16 +17,23 @@ class FakeSpeaker:
         self.spoken.append(text)
 
 
-class FakeTutor:
-    def __init__(self, replies):
-        self.replies = list(replies)
-        self.calls = []
+class FakeBrain:
+    """Script items: TurnResult (returned) or Exception (raised)."""
 
-    def reply(self, window, system_note=None):
-        self.calls.append((list(window), system_note))
-        if isinstance(self.replies[0], Exception):
-            raise self.replies.pop(0)
-        return self.replies.pop(0)
+    def __init__(self, results):
+        self.items = list(results)
+        self.texts = []
+        self.closed = False
+
+    def turn(self, text):
+        self.texts.append(text)
+        item = self.items.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        return item
+
+    def close(self):
+        self.closed = True
 
 
 class FakePrompt:
@@ -53,11 +59,11 @@ class FakePrompt:
 _UNSET = object()
 
 
-def run(cfg, script, *, tutor=None, transcribe=None, record_audio=_UNSET, speaker=None):
+def run(cfg, script, *, brain=None, transcribe=None, record_audio=_UNSET, speaker=None):
     output = []
     rc = run_sprechen(
         cfg,
-        tutor=tutor or FakeTutor(["Alles klar!"]),
+        brain=brain or FakeBrain([TurnResult(reply="Alles klar!")]),
         transcribe=transcribe or (lambda audio: "Guten Tag"),
         speaker=speaker or FakeSpeaker(),
         record_audio=(
@@ -73,15 +79,14 @@ def run(cfg, script, *, tutor=None, transcribe=None, record_audio=_UNSET, speake
 
 # -- voice turns ---------------------------------------------------------------
 
-def test_voice_turn_transcribes_replies_speaks_and_logs(config):
+def test_voice_turn_transcribes_replies_speaks(config):
     spoken = FakeSpeaker()
-    # correction template last — parse_correction reads to end-of-line
-    reply = "Müde ist okay! Schlaf gut!\nRichtig: Ich bin müde. / Deine Version: ich bin müd."
-    tutor = FakeTutor([reply])
+    reply = "Müde ist okay! Schlaf gut!"
+    brain = FakeBrain([TurnResult(reply=reply, speakable=True)])
     rc, output = run(
         config,
         ["space", "q"],
-        tutor=tutor,
+        brain=brain,
         transcribe=lambda audio: "ich bin müd",
         speaker=spoken,
     )
@@ -91,68 +96,60 @@ def test_voice_turn_transcribes_replies_speaks_and_logs(config):
     assert any("Herr Claw: Müde ist okay!" in line for line in output)
     assert any("⏱" in line for line in output)  # round-trip budget on screen
     assert spoken.spoken == [reply]
-
-    window, system_note = tutor.calls[0]  # exactly one LLM exchange
-    assert len(tutor.calls) == 1
-    assert window == [{"role": "user", "content": "ich bin müd"}]
-    assert system_note is None
-
-    # correction extracted → SRS mistake persisted (one state path)
-    srs = SrsState(config.srs_path)
-    assert [m.example for m in srs.mistakes] == ["ich bin müd."]
-    assert srs.mistakes[0].fix.startswith("Ich bin müde")
-    assert config.session_path.exists() and config.srs_path.exists()
+    assert brain.texts == ["ich bin müd"]  # the transcript is the brain's input
+    assert brain.closed  # the loop shuts the brain down (session end lives there)
 
 
 def test_correction_is_spoken_too(config):
     spoken = FakeSpeaker()
-    tutor = FakeTutor(["Richtig: Ich bin müde. / Deine Version: ich bin müd."])
+    reply = "Richtig: Ich bin müde. / Deine Version: ich bin müd."
+    brain = FakeBrain([TurnResult(reply=reply, speakable=True)])
     rc, _ = run(
         config,
         ["space", "q"],
-        tutor=tutor,
+        brain=brain,
         transcribe=lambda audio: "ich bin müd",
         speaker=spoken,
     )
-    assert spoken.spoken == ["Richtig: Ich bin müde. / Deine Version: ich bin müd."]
+    assert spoken.spoken == [reply]
 
 
-def test_silence_never_reaches_stt_or_llm(config):
+def test_silence_never_reaches_stt_or_brain(config):
     transcribe = lambda audio: pytest.fail("STT called without audio")  # noqa: E731
-    tutor = FakeTutor(["Sollte nie kommen"])
+    brain = FakeBrain([TurnResult(reply="Sollte nie kommen")])
     rc, output = run(
         config,
         ["space", "q"],
-        tutor=tutor,
+        brain=brain,
         transcribe=transcribe,
         record_audio=lambda: np.zeros(0, dtype=np.float32),
     )
     assert rc == 0
     assert any("nichts gehört" in line for line in output)
-    assert tutor.calls == []
+    assert brain.texts == []
 
 
 def test_unrecognized_speech_asks_again_and_speaks(config):
     spoken = FakeSpeaker()
-    tutor = FakeTutor(["Sollte nie kommen"])
+    brain = FakeBrain([TurnResult(reply="Sollte nie kommen")])
     rc, output = run(
         config,
         ["space", "q"],
-        tutor=tutor,
+        brain=brain,
         transcribe=lambda audio: "",
         speaker=spoken,
     )
     assert any("nicht verstanden" in line for line in output)
     assert spoken.spoken == ["Das habe ich nicht verstanden. Nochmal, bitte!"]
-    assert tutor.calls == []
+    assert brain.texts == []
 
 
-def test_llm_error_keeps_the_loop_alive(config):
-    tutor = FakeTutor([LLMError("Rate-Limit"), "Zweiter Versuch klappt!"])
+def test_brain_error_keeps_the_loop_alive(config):
+    brain = FakeBrain([TurnError("Rate-Limit"), TurnResult(reply="Zweiter Versuch klappt!")])
     rc, output = run(
         config,
         ["space", "space", "q"],
-        tutor=tutor,
+        brain=brain,
         transcribe=lambda audio: "Hallo",
     )
     assert rc == 0
@@ -162,29 +159,27 @@ def test_llm_error_keeps_the_loop_alive(config):
 
 # -- typed lines ---------------------------------------------------------------
 
-def test_typed_command_prints_but_never_speaks(config):
-    srs = SrsState(config.srs_path)
-    srs.add_mistake(example="ich bin müd", fix="Ich bin müde.")
-    srs.save()
+def test_command_output_prints_but_never_speaks(config):
     spoken = FakeSpeaker()
-    tutor = FakeTutor(["UNUSED"])
+    # the brain marks command output speakable=False — voice prints it only
+    brain = FakeBrain([TurnResult(reply="📊 Dein Fortschritt: …", speakable=False)])
 
-    rc, output = run(config, ["/fehler", "q"], tutor=tutor, speaker=spoken)
+    rc, output = run(config, ["/fortschritt", "q"], brain=brain, speaker=spoken)
 
     assert rc == 0
-    assert any("Deine letzten" in line for line in output)
-    assert spoken.spoken == []  # command output is TUI text, never spoken
-    assert tutor.calls == []
+    assert any("Dein Fortschritt" in line for line in output)
+    assert spoken.spoken == []  # command output is screen text, never spoken
+    assert brain.texts == ["/fortschritt"]
 
 
-def test_typed_plain_text_goes_through_the_tutor(config):
+def test_typed_plain_text_goes_through_the_brain(config):
     spoken = FakeSpeaker()
-    tutor = FakeTutor(["Ich bin Herr Claw!"])
+    brain = FakeBrain([TurnResult(reply="Ich bin Herr Claw!")])
 
-    rc, output = run(config, ["Hallo, wer bist du?", "q"], tutor=tutor, speaker=spoken)
+    rc, output = run(config, ["Hallo, wer bist du?", "q"], brain=brain, speaker=spoken)
 
     assert rc == 0
-    assert tutor.calls[0][0][-1] == {"role": "user", "content": "Hallo, wer bist du?"}
+    assert brain.texts == ["Hallo, wer bist du?"]
     assert spoken.spoken == ["Ich bin Herr Claw!"]
 
 
@@ -209,12 +204,12 @@ def test_default_transcriber_is_wired_into_the_call_site(config, monkeypatch):
 
     monkeypatch.setattr("voice.loop.Transcriber", FakeSTT)
     spoken = FakeSpeaker()
-    tutor = FakeTutor(["Ich habe dich verstanden!"])
+    brain = FakeBrain([TurnResult(reply="Ich habe dich verstanden!")])
     output = []
 
     rc = run_sprechen(
         config,  # no transcribe injected — the default path under test
-        tutor=tutor,
+        brain=brain,
         speaker=spoken,
         record_audio=lambda: np.zeros(1600, dtype=np.float32),
         key_prompt=FakePrompt(["space", "q"]),
@@ -243,7 +238,7 @@ def test_warm_failure_warns_but_loop_survives(config, monkeypatch):
 
     rc = run_sprechen(
         config,
-        tutor=FakeTutor(["OK"]),
+        brain=FakeBrain([TurnResult(reply="OK")]),
         speaker=FakeSpeaker(),
         record_audio=lambda: np.zeros(10, dtype=np.float32),
         key_prompt=FakePrompt(["q"]),
@@ -254,14 +249,29 @@ def test_warm_failure_warns_but_loop_survives(config, monkeypatch):
     assert any("Whisper-Modell nicht geladen" in line for line in output)
 
 
-def test_missing_llm_config_fails_fast(config, monkeypatch):
+def test_unconfigured_local_fallback_warns_per_turn(monkeypatch, config):
+    """Sandbox unavailable + local brain unconfigured (no API key): the loop
+    warns honestly on every turn but never crashes — thin clients degrade,
+    they don't die (P6)."""
+    from dataclasses import replace
+
+    from agent.llm import LLMError
+
     def broken_client(*args, **kwargs):
         raise LLMError("NVIDIA_API_KEY ist nicht gesetzt.")
 
-    monkeypatch.setattr("voice.loop.make_client", broken_client)
+    monkeypatch.setattr("agent.turns.make_client", broken_client)
+    cfg = replace(config, chat_backend="local")  # no sandbox detour — straight to local
     output = []
-    rc = run_sprechen(config, output_fn=output.append)
-    assert rc == 1
+    rc = run_sprechen(
+        cfg,
+        speaker=FakeSpeaker(),
+        transcribe=lambda audio: "Hallo",
+        record_audio=lambda: np.zeros(1600, dtype=np.float32),
+        key_prompt=FakePrompt(["space", "q"]),
+        output_fn=output.append,
+    )
+    assert rc == 0
     assert any("NVIDIA_API_KEY" in line for line in output)
 
 
@@ -274,10 +284,10 @@ def test_missing_mic_warns_and_typing_still_works(config, monkeypatch):
 
     monkeypatch.setattr("voice.loop.Mic", lambda override="": MiclessBridge())
     spoken = FakeSpeaker()
-    tutor = FakeTutor(["Trotzdem da!"])
+    brain = FakeBrain([TurnResult(reply="Trotzdem da!")])
 
     rc, output = run(
-        config, ["hallo", "q"], tutor=tutor, speaker=spoken, record_audio=None
+        config, ["hallo", "q"], brain=brain, speaker=spoken, record_audio=None
     )
 
     assert rc == 0
@@ -285,11 +295,10 @@ def test_missing_mic_warns_and_typing_still_works(config, monkeypatch):
     assert spoken.spoken == ["Trotzdem da!"]
 
 
-def test_quit_without_turns_saves_state_but_no_farewell(config):
+def test_quit_without_turns_no_farewell(config):
     rc, output = run(config, ["q"])
     assert rc == 0
     assert not any("Tschüss" in line for line in output)
-    assert config.session_path.exists()
 
 
 # -- KeyPrompt (terminal line editor) ------------------------------------------

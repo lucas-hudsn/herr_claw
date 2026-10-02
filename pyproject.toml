@@ -6,10 +6,10 @@ readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
     # Core = everything the sandbox-installed trigger path needs (P5: OpenClaw cron
-    # fires `herr-claw daemon --trigger <job>` inside the sandbox; core must install
+    # fires `herr-claw trigger <job>` inside the sandbox; core must install
     # on Linux arm64, so all macOS-only packages live in the extras below).
     # P1 (chat + memory): openai, python-dotenv, typer. P2/P5 (bridge client): mcp.
-    # P4 (Telegram + daemon + schedule.yaml): pyyaml.
+    # P4/P5 (Telegram pushes + schedule.yaml): pyyaml.
     "mcp>=2.2.0",
     "openai>=1.100",
     "python-dotenv>=1.0",

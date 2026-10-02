@@ -9,8 +9,8 @@
 #     at onboard; the gateway resolves TELEGRAM_BOT_TOKEN at egress, so the
 #     token itself never enters the sandbox.
 #   ● herrclaw-bridge (below)       — the ONE host endpoint the sandbox may
-#     call: herrclaw_bridge (Apple Reminders/Calendar + scoped Obsidian vault
-#     + audited §4.1 run_job) on host loopback port 8765.
+#     call: herrclaw_bridge (Apple Reminders/Calendar + scoped Obsidian vault,
+#     7 audited tools) on host loopback port 8765.
 #   ✘ everything else               — denied; unknown hosts go through the
 #     OpenClaw TUI approval flow.
 #
@@ -27,20 +27,43 @@
 # services): private-range access is granted via allowed_ips, host+port+verb
 # scoped to MCP's POST/GET/DELETE on /mcp.
 #
-# Applied increments that `nemoclaw policy add` cannot carry (its merge
-# normalizes `binaries:`/`allowed_ips:` away, so a preset containing them
-# never confirms) — these were added with a full `openshell policy set`:
-#   endpoints[].allowed_ips: [10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, fc00::/7]
-#   binaries: ["/sandbox/herrclaw/.venv/bin/*", "/usr/bin/curl",
-#              "/home/linuxbrew/.linuxbrew/Cellar/python@3.14/3.14.8/bin/python3.14"]
-# The binaries pin is the load-bearing caller scoping: only the trigger venv
-# (and curl for smoke tests) may reach the bridge; anything else on the
-# sandbox (node, the OpenClaw agent itself) is denied at the policy layer
-# (visible as DENIED lines with reason "binary ... not allowed" in the
-# sandbox OCSF log).
-# Governance enforcement for Apple/vault/job access additionally lives AT the
-# bridge: fixed allowlists plus ~/.herr-claw/audit.log, which records every
-# call — allowed AND denied. The deny moment in the demo comes from that log.
+# Caller scoping (the `binaries` pin) and allowed_ips cannot be carried by
+# `nemoclaw policy add` (its merge normalizes both keys away), so they live in
+# the gateway policy, applied with a full `openshell policy set`.
+#
+# LIVE state: policy v11 (2026-10-02). The herrclaw-bridge rule's binaries
+# pin, exactly:
+#   /sandbox/herrclaw/.venv/bin/*  +  /sandbox/herrclaw/.venv/bin/**  — trigger venv
+#   /usr/bin/curl                                                     — smoke tests
+#   /home/linuxbrew/.linuxbrew/Cellar/python@3.14/3.14.8/bin/python3.14
+#   /home/linuxbrew/.linuxbrew/**                                     — brew runtime
+#   /opt/openshell/bin/openshell-sandbox                              — sandbox infra
+#   /usr/local/bin/openclaw + /usr/local/bin/node + /usr/bin/node     — THE OPENCLAW RUNTIME
+#
+# v11 deliberately adds the OpenClaw runtime: the sandbox agent itself may now
+# call the bridge tools (its own MCP config points at the same endpoint; cron
+# fires and the `turn` brain already reach it via HERR_BRIDGE_URL). The
+# layering stays two-sided:
+#   - WHO may dial the bridge is scoped HERE — only the binaries above; every
+#     other binary in the sandbox still gets OCSF DENIED lines
+#     ("binary ... not allowed") in the sandbox policy log.
+#   - WHAT a call may do is enforced AT the bridge — the fixed 7-tool
+#     allowlist (reminders/calendar/vault), the vault path allowlist
+#     (Deutsch/, Daily notes/, Weeks/; append-only), and
+#     ~/.herr-claw/audit.log, which records every call — allowed AND denied.
+# The deny moment in the demo is unchanged (a vault write outside the scoped
+# folders, e.g. Books/, is still denied + audited) — and since v11 it can be
+# demonstrated from the agent itself, not only from a host-side test.
+#
+# Reproducing v11 (e.g. after a sandbox rebuild):
+#   openshell policy get my-assistant --full -o json > captured.json   # baseline
+#   # add the binaries above + the allowed_ips to the herrclaw-bridge rule,
+#   # then apply the complete policy:
+#   openshell policy set my-assistant --policy v11.yaml
+# (`openshell policy update` cannot do this incrementally: it refuses to fold
+# new binaries into an existing rule, and --add-allow is ambiguous once two
+# rules share host:port — so the full-set path is the reproducible one. Keep
+# the captured baseline; rollback is re-setting it.)
 version: 1
 preset:
   name: herrclaw-bridge

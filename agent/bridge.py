@@ -18,11 +18,22 @@ import asyncio
 from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 
+from herrclaw_bridge.errors import BridgeError
 from herrclaw_bridge.server import DEFAULT_BRIDGE_URL
 
+__all__ = ["BridgeError", "BridgeUnreachable", "BridgeClient", "BridgeVault"]
 
-class BridgeError(RuntimeError):
-    """The bridge is unreachable, or the call failed/denied on its side."""
+# BridgeError is herrclaw_bridge's own error type, re-exported here: the MCP
+# client raises it, and everything that calls the bridge through this module
+# raises the very same class — one error type, so `except BridgeError` behaves
+# identically on both sides of the bridge (agent/scheduling.py, agent/jobs.py).
+
+
+class BridgeUnreachable(BridgeError):
+    """Transport-level failure (refused connect, timeout) — safe to retry.
+
+    Tool-level outcomes (policy denials included) stay plain BridgeError:
+    retrying those would re-run a refused call and spam the audit log."""
 
 
 class BridgeClient:
@@ -36,11 +47,11 @@ class BridgeClient:
         except BridgeError:
             raise
         except (asyncio.TimeoutError, TimeoutError):
-            raise BridgeError(
+            raise BridgeUnreachable(
                 f"Bridge-Timeout nach {self.timeout_s:.0f}s ({self.url}) — läuft `herr-claw bridge`?"
             )
         except BaseException as exc:  # anyio raises ExceptionGroup on refused connects
-            raise BridgeError(_transport_message(exc, self.url)) from exc
+            raise BridgeUnreachable(_transport_message(exc, self.url)) from exc
 
     def ping(self) -> bool:
         try:
@@ -57,6 +68,23 @@ class BridgeClient:
         if getattr(result, "is_error", False):
             raise BridgeError(_result_text(result) or "Bridge-Aufruf fehlgeschlagen.")
         return _result_text(result)
+
+
+class BridgeVault:
+    """Vault-shaped adapter over the bridge's vault tools — the in-sandbox
+    replacement for direct file access (P6: the Obsidian vault never leaves
+    the host; sandbox code appends through the same allowlisted, audited
+    vault_append/vault_read tools as everything else). Duck-types the two
+    methods agent/tracker.safe_append uses: append(rel_path, text), read."""
+
+    def __init__(self, client: BridgeClient) -> None:
+        self.client = client
+
+    def append(self, rel_path: str, text: str) -> str:
+        return self.client.call_tool("vault_append", {"rel_path": rel_path, "text": text})
+
+    def read(self, rel_path: str) -> str:
+        return self.client.call_tool("vault_read", {"rel_path": rel_path})
 
 
 def _result_text(result) -> str:

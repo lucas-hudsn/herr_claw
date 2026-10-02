@@ -1,13 +1,17 @@
 # THE daily scheduler config (SPEC §4.1) — one config file, one mechanism.
-# Times are Berlin wall clock; read by BOTH scheduler surfaces:
-# - `herr-claw daemon --install-cron` registers one OpenClaw cron job per
-#   entry inside sandbox `my-assistant` (the ONE scheduler, P5). Cron fires
-#   run `herr-claw daemon --trigger <job>` in the sandbox → ONE audited
-#   `run_job` bridge call → the job body executes on the host.
-# - `herr-claw daemon` (host loop) is break-glass only; it shares the same
-#   session.json dedup, so both surfaces never double-fire a job.
+# Times are Berlin wall clock. `herr-claw install-cron` (host) reads this file
+# and registers one OpenClaw cron job per entry inside sandbox `my-assistant`
+# (the ONE scheduler, P5). Cron fires run `herr-claw trigger <job>` in the
+# sandbox, where the job body executes (agent/jobs.py) against the sandbox
+# state dir; its Apple/vault calls cross the audited bridge. Per-day dedup
+# lives in session.json. There is no second scheduler and no host daemon.
 jobs:
   nudge: "08:00"  # Morning Nudge: freebusy → slot → Reminder + event → Telegram
   quiz: "12:30"   # Micro-quiz: 3 questions from the weakest vocab (only if the nudge ran)
   recap: "20:00"  # Recap: daily note + Deutsch/progress.md + reminders complete
 # weekly_review: "Sonntag 10:00"  # CUT from demo scope (SPEC §4.1 — no Sunday before the deadline)
+
+# Self-healing watchdogs (raw cron exprs): keep the in-sandbox Telegram
+# poller alive. The watchdog is idempotent — a healthy poller is a no-op.
+watchdogs:
+  telegram: "*/5 * * * *"

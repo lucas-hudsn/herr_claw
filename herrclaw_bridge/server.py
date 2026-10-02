@@ -1,10 +1,10 @@
 """The MCP bridge server — Streamable-HTTP on 127.0.0.1:8765 (SPEC §3/§5).
 
-Exposes exactly eight tools over MCPServer (mcp SDK v2): reminders.*, the
-calendar pair, the scoped vault pair, and `run_job` — the host-side
-execution path for the §4.1 jobs (the ONE scheduler is the OpenClaw cron
-in sandbox `my-assistant`; its cron fires call run_job from the sandbox,
-P5). All enforcement stays in the component modules (allowlist + audit) —
+Exposes exactly seven tools over MCPServer (mcp SDK v2): reminders.*, the
+calendar pair, and the scoped vault pair — the ONE Apple/vault door the
+sandboxed agent may use (P6: the job bodies run in the sandbox; their
+Apple/vault calls cross the bridge here, audited like every other call).
+All enforcement stays in the component modules (allowlist + audit) —
 this file is glue, deliberately boring: no policy decisions may ever live
 in the transport layer.
 
@@ -33,8 +33,7 @@ INSTRUCTIONS = (
     "Host bridge for Apple Reminders, Apple Calendar and the scoped Obsidian vault. "
     "Everything is allowlisted and audited: reminders → list 'Deutsch' only; "
     "calendar writes → calendar 'Deutsch Lernen' only; vault access → Deutsch/, "
-    "'Daily notes'/ and Weeks/ only, append-only; run_job executes only the fixed "
-    "§4.1 jobs (nudge/quiz/recap) host-side. Denials come back as error results."
+    "'Daily notes'/ and Weeks/ only, append-only. Denials come back as error results."
 )
 
 
@@ -105,16 +104,6 @@ def create_server(vault: Vault | None) -> MCPServer:
         """Text an eine Vault-Datei anhängen (append-only; gleiche Allowlist wie vault_read)."""
         require_vault().append(rel_path, text)
         return f"Angehängt: {rel_path}"
-
-    @server.tool()
-    @_guard
-    def run_job(name: str) -> str:
-        """Einen Tages-Job host-seitig ausführen: 'nudge' | 'quiz' | 'recap'
-        (feste Namen aus agent/schedule.yaml, keine Argumente — Triggerpfad
-        des OpenClaw-cron in der Sandbox; Dedup über session.json)."""
-        from agent.jobs import run_job_once
-
-        return run_job_once(name, vault=vault)
 
     return server
 

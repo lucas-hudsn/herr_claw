@@ -1,5 +1,6 @@
-"""agent/telegram.py — Bot API client: retries, chat allowlist, chunking.
+"""agent/telegram.py — Bot API client: retries, token hygiene, chunking.
 
+Push-only (the day's jobs send and exit — there is no polling loop).
 The fake transport replaces urllib.request.urlopen; no network, no secrets.
 """
 
@@ -13,7 +14,6 @@ from agent.telegram import (
     CHAT_LIMIT,
     TelegramClient,
     TelegramError,
-    parse_update,
     split_message,
 )
 
@@ -104,24 +104,6 @@ def test_api_rejection_surfaces_description():
     assert "chat not found" in str(excinfo.value)
 
 
-def test_get_updates_sends_offset_and_timeout():
-    opener = FakeOpener({"ok": True, "result": [{"update_id": 7}]})
-    client = TelegramClient("t", opener=opener)
-    updates = client.get_updates(offset=5, timeout_s=42)
-    assert updates == [{"update_id": 7}]
-    request, timeout = opener.requests[0]
-    body = json.loads(request.data)
-    assert body == {"offset": 5, "timeout": 42}
-    assert timeout >= 42  # client-side socket timeout exceeds the long poll
-
-
-def test_get_updates_timeout_is_capped():
-    opener = FakeOpener({"ok": True, "result": []})
-    client = TelegramClient("t", opener=opener)
-    client.get_updates(offset=0, timeout_s=10_000)
-    assert json.loads(opener.requests[0][0].data)["timeout"] == 50
-
-
 def test_send_message_chunks_over_the_limit():
     opener = FakeOpener({"ok": True, "result": {"message_id": 1}})
     client = TelegramClient("t", opener=opener)
@@ -143,20 +125,3 @@ def test_split_message_hard_splits_single_long_line():
 
 def test_split_message_empty_is_noop():
     assert split_message("") == []
-
-
-# ---- update parsing ----------------------------------------------------------
-
-
-def test_parse_update_extracts_text_chat_and_id():
-    update = {"update_id": 3, "message": {"text": "/quiz", "chat": {"id": 99}}}
-    incoming = parse_update(update)
-    assert incoming.update_id == 3
-    assert incoming.chat_id == "99"
-    assert incoming.text == "/quiz"
-
-
-def test_parse_update_ignores_non_text_and_broken_shapes():
-    assert parse_update({"update_id": 1}) is None
-    assert parse_update({"update_id": 2, "message": {"chat": {"id": 1}}}) is None
-    assert parse_update({"update_id": 3, "message": {"text": "hi"}}) is None

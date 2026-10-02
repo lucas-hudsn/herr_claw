@@ -75,37 +75,12 @@ def test_all_tools_across_the_wire(running_bridge):
     assert "Termin angelegt" in client.call_tool("calendar_add", {"title": "T", "start": "2026-10-02 09:00"})
 
 
-def test_run_job_trigger_path_across_the_wire(running_bridge, monkeypatch):
-    """P5: an OpenClaw-cron fire (in the sandbox) reaches run_job over MCP;
-    the tool forwards the name and returns the host-side result text. The
-    engine itself is unit-tested in test_jobs.py — here we prove the wiring
-    and that the server hands its own (allowlisted) vault to the engine."""
-    import agent.jobs as jobs_mod
-
-    seen: dict = {}
-
-    def fake_run_job_once(name, vault=None, **_kwargs):
-        seen["name"] = name
-        seen["vault_root"] = vault.root
-        return f"Job „{name}“ erledigt."
-
-    monkeypatch.setattr(jobs_mod, "run_job_once", fake_run_job_once)
-    client, vault, _tmp = running_bridge
-    assert "erledigt" in client.call_tool("run_job", {"name": "recap"})
-    assert seen == {"name": "recap", "vault_root": vault.root}
-
-
-def test_run_job_denial_comes_back_as_german_error(running_bridge, monkeypatch):
-    import agent.jobs as jobs_mod
-    from herrclaw_bridge.errors import BridgeError as LocalBridgeError
-
-    def denying(_name, **_kwargs):
-        raise LocalBridgeError("Unbekannter Job „x“ — erlaubt sind: nudge, quiz, recap.")
-
-    monkeypatch.setattr(jobs_mod, "run_job_once", denying)
+def test_run_job_tool_is_gone(running_bridge):
+    """P6: the bridge no longer executes jobs — the sandbox does. Calling the
+    removed tool fails as an unknown-tool error, not a silent pass-through."""
     client, _vault, _tmp = running_bridge
-    with pytest.raises(BridgeError, match="Unbekannter Job"):
-        client.call_tool("run_job", {"name": "x"})
+    with pytest.raises(BridgeError):
+        client.call_tool("run_job", {"name": "recap"})
 
 
 def test_vault_roundtrip_across_the_wire(running_bridge):
